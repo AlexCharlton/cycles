@@ -1,15 +1,19 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{
+    fmt,
+    ops::{Add, Mul, Sub},
+};
 
 pub use bjorklund::{bjorklund, Bjorklund};
 pub use event_cache::EventCache;
 use num_rational::Rational64;
 pub use slice::SliceEvents;
 pub use span::Span;
-use std::{
-    fmt,
-    ops::{Add, Mul, Sub},
-    sync::Arc,
-};
 
 pub mod bjorklund;
 pub mod ctrl;
@@ -36,7 +40,7 @@ pub mod prelude {
 pub trait Pattern {
     /// The type of the values emitted in the pattern's events.
     type Value;
-    /// An iterator yielding the events occuring within a query's span.
+    /// An iterator yielding the events occurring within a query's span.
     type Events: Iterator<Item = Event<Self::Value>>;
 
     /// Query the pattern for events within the given span.
@@ -355,7 +359,7 @@ pub trait Pattern {
     /// Return a wrapper providing a `fmt::Debug` implementation for the pattern.
     ///
     /// Formats events resulting from a query to the given span.
-    fn debug_span(&self, span: Span) -> PatternDebug<Self::Value, Self::Events>
+    fn debug_span(&self, span: Span) -> PatternDebug<'_, Self::Value, Self::Events>
     where
         Self: Sized,
     {
@@ -366,7 +370,7 @@ pub trait Pattern {
     /// Return a wrapper providing a `fmt::Debug` implementation for the pattern.
     ///
     /// Formats events resulting from a query for a single cycle.
-    fn debug(&self) -> PatternDebug<Self::Value, Self::Events>
+    fn debug(&self) -> PatternDebug<'_, Self::Value, Self::Events>
     where
         Self: Sized,
     {
@@ -423,7 +427,7 @@ pub struct DynPattern<T>(Arc<dyn Pattern<Value = T, Events = BoxEvents<T>>>);
 /// A dynamic representation of a pattern's associated events iterator.
 pub struct BoxEvents<T>(Box<dyn Iterator<Item = Event<T>>>);
 
-/// A type providing a [`std::fmt::Debug`] implementation for types implementing [`Pattern`].
+/// A type providing a [`core::fmt::Debug`] implementation for types implementing [`Pattern`].
 pub struct PatternDebug<'p, V, E> {
     pattern: &'p dyn Pattern<Value = V, Events = E>,
     span: Span,
@@ -652,13 +656,13 @@ impl<T> Pattern for DynPattern<T> {
 
 impl<S: Sample> Pattern for Signal<S> {
     type Value = S::Value;
-    type Events = std::iter::Once<Event<Self::Value>>;
+    type Events = core::iter::Once<Event<Self::Value>>;
     fn query(&self, active @ Span { start, end }: Span) -> Self::Events {
         let Signal(s) = self;
         let value = s.sample(start + ((end - start) / 2));
         let whole = None;
         let event = Event::new(value, active, whole);
-        std::iter::once(event)
+        core::iter::once(event)
     }
 }
 
@@ -820,13 +824,13 @@ impl One for Rational {
 }
 
 impl Ord for EventSpan {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.whole_or_active().cmp(&other.whole_or_active())
     }
 }
 
 impl PartialOrd for EventSpan {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -894,7 +898,7 @@ pub fn steady<T: Clone>(t: T) -> impl Pattern<Value = T> {
 /// When queried, always produces an empty event iterator.
 // TODO: Better name = empty?
 pub fn silence<T>() -> impl Pattern<Value = T> {
-    |_| std::iter::empty()
+    |_| core::iter::empty()
 }
 
 /// Repeats a given discrete value once per cycle.
@@ -1192,352 +1196,367 @@ fn filter_euclid_full(p: impl Pattern<Value = (bool, usize)>) -> impl Pattern {
 
 // ----------------------------------------------------------------------------
 
-#[test]
-fn test_rem_euclid() {
-    // For positive values, behaves the same as remainder.
-    let d = Rational::from(5);
-    for i in (0..10).map(Rational::from) {
-        assert_eq!(rem_euclid(i, d), i % d);
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::{string::ToString, vec, vec::Vec};
+
+    use super::*;
+
+    #[test]
+    fn test_rem_euclid() {
+        // For positive values, behaves the same as remainder.
+        let d = Rational::from(5);
+        for i in (0..10).map(Rational::from) {
+            assert_eq!(rem_euclid(i, d), i % d);
+        }
+
+        // For negative, acts in a kind of euclidean cycle.
+        let d = Rational::from(3);
+        let test = (-9..=0).rev().map(Rational::from);
+        let expected = [0, 2, 1].into_iter().cycle().map(Rational::from);
+        for (a, b) in test.zip(expected) {
+            #[cfg(feature = "std")]
+            dbg!(a, rem_euclid(a, d));
+            assert_eq!(rem_euclid(a, d), b);
+        }
+
+        // Should work for fractions.
+        let d = Rational::new(1, 2);
+        let test = (0..10).map(|i| Rational::new(i, 10));
+        let expected = (0..5).cycle().map(|i| Rational::new(i, 10));
+        for (a, b) in test.zip(expected) {
+            assert_eq!(rem_euclid(a, d), b);
+        }
     }
 
-    // For negative, acts in a kind of euclidean cycle.
-    let d = Rational::from(3);
-    let test = (-9..=0).rev().map(Rational::from);
-    let expected = [0, 2, 1].into_iter().cycle().map(Rational::from);
-    for (a, b) in test.zip(expected) {
-        dbg!(a, rem_euclid(a, d));
-        assert_eq!(rem_euclid(a, d), b);
+    #[test]
+    fn test_shift() {
+        let a = || m![bd ~ bd ~];
+        let b = || m![~ bd ~ bd];
+        assert_eq!(
+            a().shift((1, 4).into()).query_cycle().collect::<Vec<_>>(),
+            b().query_cycle().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            a().shift((5, 4).into()).query_cycle().collect::<Vec<_>>(),
+            b().query_cycle().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            a().query_cycle().collect::<Vec<_>>(),
+            b().shift((-1, 4).into()).query_cycle().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            a().query_cycle().collect::<Vec<_>>(),
+            b().shift((-3, 4).into()).query_cycle().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            a().shift((1, 8).into()).query_cycle().collect::<Vec<_>>(),
+            b().shift((-1, 8).into()).query_cycle().collect::<Vec<_>>(),
+        );
+        assert!(
+            a().shift((1, 8).into()).query_cycle().collect::<Vec<_>>()
+                != b().query_cycle().collect::<Vec<_>>()
+        );
     }
 
-    // Should work for fractions.
-    let d = Rational::new(1, 2);
-    let test = (0..10).map(|i| Rational::new(i, 10));
-    let expected = (0..5).cycle().map(|i| Rational::new(i, 10));
-    for (a, b) in test.zip(expected) {
-        assert_eq!(rem_euclid(a, d), b);
-    }
-}
-
-#[test]
-fn test_shift() {
-    let a = || m![bd ~ bd ~];
-    let b = || m![~ bd ~ bd];
-    assert_eq!(
-        a().shift((1, 4).into()).query_cycle().collect::<Vec<_>>(),
-        b().query_cycle().collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        a().shift((5, 4).into()).query_cycle().collect::<Vec<_>>(),
-        b().query_cycle().collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        a().query_cycle().collect::<Vec<_>>(),
-        b().shift((-1, 4).into()).query_cycle().collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        a().query_cycle().collect::<Vec<_>>(),
-        b().shift((-3, 4).into()).query_cycle().collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        a().shift((1, 8).into()).query_cycle().collect::<Vec<_>>(),
-        b().shift((-1, 8).into()).query_cycle().collect::<Vec<_>>(),
-    );
-    assert!(
-        a().shift((1, 8).into()).query_cycle().collect::<Vec<_>>()
-            != b().query_cycle().collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn test_join() {
-    let pp = |active @ whole| std::iter::once(Event::new(m![1.0 1.0], active, Some(whole)));
-    let p = join(pp);
-    let mut q = p.query(span!(0 / 1, 2 / 1));
-    let q0 = span!(0 / 1, 1 / 2);
-    let q1 = span!(1 / 2, 1 / 1);
-    let q2 = span!(1 / 1, 3 / 2);
-    let q3 = span!(3 / 2, 2 / 1);
-    assert_eq!(q.next(), Some(Event::new(1.0, q0, Some(q0))));
-    assert_eq!(q.next(), Some(Event::new(1.0, q1, Some(q1))));
-    assert_eq!(q.next(), Some(Event::new(1.0, q2, Some(q2))));
-    assert_eq!(q.next(), Some(Event::new(1.0, q3, Some(q3))));
-    assert_eq!(q.next(), None);
-}
-
-#[test]
-fn test_merge_extend() {
-    let p = ctrl::sound(atom("hello")).merge_extend(ctrl::note(atom(4.0)));
-    dbg!(p.debug_span(span!(0 / 1, 4 / 1)));
-    let mut cycle = p.query(span!(0 / 1, 1 / 1));
-    let mut expected = std::collections::BTreeMap::new();
-    expected.insert(ctrl::SOUND.to_string(), ctrl::Value::String("hello".into()));
-    expected.insert(ctrl::NOTE.to_string(), ctrl::Value::F64(4.0));
-    assert_eq!(cycle.next().unwrap().value, expected);
-    assert_eq!(cycle.next(), None);
-}
-
-#[test]
-fn test_apply() {
-    let a = atom(1.0).rate(2.into());
-    let b = atom(|v| v + 2.0).rate(3.into());
-    let p = a.app(b);
-    let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
-    // cycle1                        cycle2
-    // a              a
-    // b         b         b
-    // 0/1       1/3  1/2  2/3       1/1
-    // 1         2    3    4
-    // |         |    |    |         |
-    let s0 = span!(0 / 1, 1 / 3);
-    let s1 = span!(1 / 3, 1 / 2);
-    let s2 = span!(1 / 2, 2 / 3);
-    let s3 = span!(2 / 3, 1 / 1);
-    assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
-    assert_eq!(v[1], Event::new(3.0, s1, Some(s1)));
-    assert_eq!(v[2], Event::new(3.0, s2, Some(s2)));
-    assert_eq!(v[3], Event::new(3.0, s3, Some(s3)));
-    assert_eq!(v.len(), 4);
-}
-
-#[test]
-fn test_rate() {
-    let p = atom("hello");
-    // Only one event per cycle by default.
-    let mut q = p.query(span!(0 / 1, 1 / 1));
-    assert!(q.next().is_some());
-    assert!(q.next().is_none());
-    // At double rate, should get 2 events per cycle.
-    let p = p.rate(Rational::new(2, 1));
-    let mut q = p.query(span!(0 / 1, 1 / 1));
-    assert!(q.next().is_some());
-    assert!(q.next().is_some());
-    assert!(q.next().is_none());
-    // If we now divide by 4, we should get half an event per cycle, or 1 per 2 cycles.
-    let p = p.rate(Rational::new(1, 4));
-    let mut q = p.query(span!(0 / 1, 2 / 1));
-    assert!(q.next().is_some());
-    assert!(q.next().is_none());
-}
-
-#[test]
-fn test_slowcat() {
-    let a = atom("a");
-    let b = atom("b");
-    let cat = slowcat([a.into_dyn(), b.into_dyn()]);
-    let span = span!(0 / 1, 5 / 2);
-    let mut es = cat
-        .query(span)
-        .map(|ev| (ev.value, ev.span.active, ev.span.whole));
-    assert_eq!(
-        Some(("a", span!(0 / 1, 1 / 1), Some(span!(0 / 1, 1 / 1)))),
-        es.next()
-    );
-    assert_eq!(
-        Some(("b", span!(1 / 1, 2 / 1), Some(span!(1 / 1, 2 / 1)))),
-        es.next()
-    );
-    assert_eq!(
-        Some(("a", span!(2 / 1, 5 / 2), Some(span!(2 / 1, 3 / 1)))),
-        es.next()
-    );
-    assert_eq!(None, es.next());
-}
-
-#[test]
-fn test_fastcat() {
-    let a = atom("a");
-    let b = atom("b");
-    let cat = fastcat([a.into_dyn(), b.into_dyn()]);
-    let span = span!(0 / 1, 5 / 4);
-    let mut es = cat
-        .query(span)
-        .map(|ev| (ev.value, ev.span.active, ev.span.whole));
-    assert_eq!(
-        Some(("a", span!(0 / 1, 1 / 2), Some(span!(0 / 1, 1 / 2)))),
-        es.next()
-    );
-    assert_eq!(
-        Some(("b", span!(1 / 2, 1 / 1), Some(span!(1 / 2, 1 / 1)))),
-        es.next()
-    );
-    assert_eq!(
-        Some(("a", span!(1 / 1, 5 / 4), Some(span!(1 / 1, 3 / 2)))),
-        es.next()
-    );
-    assert_eq!(None, es.next());
-}
-
-#[test]
-fn test_timecat() {
-    let a = atom("a");
-    let b = atom("b");
-    let cat = timecat([(Rational::from(1), a), (Rational::from(2), b)]);
-    let span = span!(1 / 4, 3 / 2);
-    dbg!(cat.debug_span(span));
-    let mut es = cat
-        .query(span)
-        .map(|ev| (ev.value, ev.span.active, ev.span.whole));
-    assert_eq!(
-        es.next(),
-        Some(("a", span!(1 / 4, 1 / 3), Some(span!(0 / 1, 1 / 3)))),
-    );
-    assert_eq!(
-        es.next(),
-        Some(("b", span!(1 / 3, 1 / 1), Some(span!(1 / 3, 1 / 1)))),
-    );
-    assert_eq!(
-        es.next(),
-        Some(("a", span!(1 / 1, 4 / 3), Some(span!(1 / 1, 4 / 3)))),
-    );
-    assert_eq!(
-        es.next(),
-        Some(("b", span!(4 / 3, 3 / 2), Some(span!(4 / 3, 2 / 1)))),
-    );
-    assert_eq!(es.next(), None);
-}
-
-#[test]
-fn test_span_cycles() {
-    let span = span!(0 / 1, 3 / 1);
-    assert_eq!(span.cycles().count(), 3);
-}
-
-#[test]
-fn test_saw() {
-    let max = 10;
-    for n in 0..=max {
-        let r = Rational::new(n, max);
-        let i = span!(r);
-        let v1 = saw().query(i).map(|ev| ev.value).next().unwrap();
-        let v2 = saw2().query(i).map(|ev| ev.value).next().unwrap();
-        println!("{}: v1={}, v2={}", r, v1, v2);
+    #[test]
+    fn test_join() {
+        let pp = |active @ whole| core::iter::once(Event::new(m![1.0 1.0], active, Some(whole)));
+        let p = join(pp);
+        let mut q = p.query(span!(0 / 1, 2 / 1));
+        let q0 = span!(0 / 1, 1 / 2);
+        let q1 = span!(1 / 2, 1 / 1);
+        let q2 = span!(1 / 1, 3 / 2);
+        let q3 = span!(3 / 2, 2 / 1);
+        assert_eq!(q.next(), Some(Event::new(1.0, q0, Some(q0))));
+        assert_eq!(q.next(), Some(Event::new(1.0, q1, Some(q1))));
+        assert_eq!(q.next(), Some(Event::new(1.0, q2, Some(q2))));
+        assert_eq!(q.next(), Some(Event::new(1.0, q3, Some(q3))));
+        assert_eq!(q.next(), None);
     }
 
-    let p = saw();
-    let a = span!(1 / 2);
-    let b = span!(-1 / 2);
-    assert_eq!(
-        p.query(a).next().unwrap().value,
-        p.query(b).next().unwrap().value
-    );
-
-    let a = span!(1 / 4);
-    let b = span!(-3 / 4);
-    assert_eq!(
-        p.query(a).next().unwrap().value,
-        p.query(b).next().unwrap().value
-    );
-}
-
-#[test]
-fn test_dyn_pattern() {
-    let _patterns: Vec<DynPattern<_>> = vec![
-        saw().into_dyn(),
-        saw2().into_dyn(),
-        silence().into_dyn(),
-        steady(Rational::new(1, 1)).into_dyn(),
-        atom(Rational::new(0, 1)).into_dyn(),
-    ];
-}
-
-#[test]
-fn test_steady() {
-    let max = 10;
-    for n in 0..=max {
-        let i = span!(Rational::new(n, max));
-        let v = steady("hello").query(i).map(|ev| ev.value).next().unwrap();
-        assert_eq!(v, "hello");
+    #[test]
+    fn test_merge_extend() {
+        let p = ctrl::sound(atom("hello")).merge_extend(ctrl::note(atom(4.0)));
+        #[cfg(feature = "std")]
+        dbg!(p.debug_span(span!(0 / 1, 4 / 1)));
+        let mut cycle = p.query(span!(0 / 1, 1 / 1));
+        let mut expected = alloc::collections::BTreeMap::new();
+        expected.insert(ctrl::SOUND.to_string(), ctrl::Value::String("hello".into()));
+        expected.insert(ctrl::NOTE.to_string(), ctrl::Value::F64(4.0));
+        assert_eq!(cycle.next().unwrap().value, expected);
+        assert_eq!(cycle.next(), None);
     }
-}
 
-#[test]
-fn test_silence() {
-    let max = 10;
-    for n in 0..=max {
-        let i = span!(Rational::new(n, max));
-        assert!(silence::<Rational>().query(i).next().is_none());
+    #[test]
+    fn test_apply() {
+        let a = atom(1.0).rate(2.into());
+        let b = atom(|v| v + 2.0).rate(3.into());
+        let p = a.app(b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // b         b         b
+        // 0/1       1/3  1/2  2/3       1/1
+        // 1         2    3    4
+        // |         |    |    |         |
+        let s0 = span!(0 / 1, 1 / 3);
+        let s1 = span!(1 / 3, 1 / 2);
+        let s2 = span!(1 / 2, 2 / 3);
+        let s3 = span!(2 / 3, 1 / 1);
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
+        assert_eq!(v[1], Event::new(3.0, s1, Some(s1)));
+        assert_eq!(v[2], Event::new(3.0, s2, Some(s2)));
+        assert_eq!(v[3], Event::new(3.0, s3, Some(s3)));
+        assert_eq!(v.len(), 4);
     }
-}
 
-#[test]
-fn test_pattern_reuse() {
-    let saw_ = saw();
-    let max = 10;
-    for n in 0..=max {
-        let i = span!(Rational::new(n, max));
-        let ev1 = saw_.query(i).next().unwrap();
-        let ev2 = saw().query(i).next().unwrap();
-        assert_eq!(ev1, ev2);
+    #[test]
+    fn test_rate() {
+        let p = atom("hello");
+        // Only one event per cycle by default.
+        let mut q = p.query(span!(0 / 1, 1 / 1));
+        assert!(q.next().is_some());
+        assert!(q.next().is_none());
+        // At double rate, should get 2 events per cycle.
+        let p = p.rate(Rational::new(2, 1));
+        let mut q = p.query(span!(0 / 1, 1 / 1));
+        assert!(q.next().is_some());
+        assert!(q.next().is_some());
+        assert!(q.next().is_none());
+        // If we now divide by 4, we should get half an event per cycle, or 1 per 2 cycles.
+        let p = p.rate(Rational::new(1, 4));
+        let mut q = p.query(span!(0 / 1, 2 / 1));
+        assert!(q.next().is_some());
+        assert!(q.next().is_none());
     }
-}
 
-#[test]
-fn test_atom() {
-    let span = span!(0 / 1, 3 / 1);
-    let pattern = atom("hello");
-    let mut values = pattern.query(span).map(|ev| ev.value);
-    assert_eq!(Some("hello"), values.next());
-    assert_eq!(Some("hello"), values.next());
-    assert_eq!(Some("hello"), values.next());
-    assert_eq!(None, values.next());
-}
+    #[test]
+    fn test_slowcat() {
+        let a = atom("a");
+        let b = atom("b");
+        let cat = slowcat([a.into_dyn(), b.into_dyn()]);
+        let span = span!(0 / 1, 5 / 2);
+        let mut es = cat
+            .query(span)
+            .map(|ev| (ev.value, ev.span.active, ev.span.whole));
+        assert_eq!(
+            Some(("a", span!(0 / 1, 1 / 1), Some(span!(0 / 1, 1 / 1)))),
+            es.next()
+        );
+        assert_eq!(
+            Some(("b", span!(1 / 1, 2 / 1), Some(span!(1 / 1, 2 / 1)))),
+            es.next()
+        );
+        assert_eq!(
+            Some(("a", span!(2 / 1, 5 / 2), Some(span!(2 / 1, 3 / 1)))),
+            es.next()
+        );
+        assert_eq!(None, es.next());
+    }
 
-#[test]
-fn test_atom_whole() {
-    let span = span!(0 / 1, 7 / 2);
-    let pattern = atom("hello");
-    let mut events = pattern.query(span);
-    {
-        let mut values = events.by_ref().map(|ev| ev.value);
+    #[test]
+    fn test_fastcat() {
+        let a = atom("a");
+        let b = atom("b");
+        let cat = fastcat([a.into_dyn(), b.into_dyn()]);
+        let span = span!(0 / 1, 5 / 4);
+        let mut es = cat
+            .query(span)
+            .map(|ev| (ev.value, ev.span.active, ev.span.whole));
+        assert_eq!(
+            Some(("a", span!(0 / 1, 1 / 2), Some(span!(0 / 1, 1 / 2)))),
+            es.next()
+        );
+        assert_eq!(
+            Some(("b", span!(1 / 2, 1 / 1), Some(span!(1 / 2, 1 / 1)))),
+            es.next()
+        );
+        assert_eq!(
+            Some(("a", span!(1 / 1, 5 / 4), Some(span!(1 / 1, 3 / 2)))),
+            es.next()
+        );
+        assert_eq!(None, es.next());
+    }
+
+    #[test]
+    fn test_timecat() {
+        let a = atom("a");
+        let b = atom("b");
+        let cat = timecat([(Rational::from(1), a), (Rational::from(2), b)]);
+        let span = span!(1 / 4, 3 / 2);
+        #[cfg(feature = "std")]
+        dbg!(cat.debug_span(span));
+        let mut es = cat
+            .query(span)
+            .map(|ev| (ev.value, ev.span.active, ev.span.whole));
+        assert_eq!(
+            es.next(),
+            Some(("a", span!(1 / 4, 1 / 3), Some(span!(0 / 1, 1 / 3)))),
+        );
+        assert_eq!(
+            es.next(),
+            Some(("b", span!(1 / 3, 1 / 1), Some(span!(1 / 3, 1 / 1)))),
+        );
+        assert_eq!(
+            es.next(),
+            Some(("a", span!(1 / 1, 4 / 3), Some(span!(1 / 1, 4 / 3)))),
+        );
+        assert_eq!(
+            es.next(),
+            Some(("b", span!(4 / 3, 3 / 2), Some(span!(4 / 3, 2 / 1)))),
+        );
+        assert_eq!(es.next(), None);
+    }
+
+    #[test]
+    fn test_span_cycles() {
+        let span = span!(0 / 1, 3 / 1);
+        assert_eq!(span.cycles().count(), 3);
+    }
+
+    #[test]
+    fn test_saw() {
+        #[cfg(feature = "std")]
+        let max = 10;
+        #[cfg(feature = "std")]
+        for n in 0..=max {
+            let r = Rational::new(n, max);
+            let i = span!(r);
+            let v1 = saw().query(i).map(|ev| ev.value).next().unwrap();
+            let v2 = saw2().query(i).map(|ev| ev.value).next().unwrap();
+            println!("{}: v1={}, v2={}", r, v1, v2);
+        }
+
+        let p = saw();
+        let a = span!(1 / 2);
+        let b = span!(-1 / 2);
+        assert_eq!(
+            p.query(a).next().unwrap().value,
+            p.query(b).next().unwrap().value
+        );
+
+        let a = span!(1 / 4);
+        let b = span!(-3 / 4);
+        assert_eq!(
+            p.query(a).next().unwrap().value,
+            p.query(b).next().unwrap().value
+        );
+    }
+
+    #[test]
+    fn test_dyn_pattern() {
+        let _patterns: Vec<DynPattern<_>> = vec![
+            saw().into_dyn(),
+            saw2().into_dyn(),
+            silence().into_dyn(),
+            steady(Rational::new(1, 1)).into_dyn(),
+            atom(Rational::new(0, 1)).into_dyn(),
+        ];
+    }
+
+    #[test]
+    fn test_steady() {
+        let max = 10;
+        for n in 0..=max {
+            let i = span!(Rational::new(n, max));
+            let v = steady("hello").query(i).map(|ev| ev.value).next().unwrap();
+            assert_eq!(v, "hello");
+        }
+    }
+
+    #[test]
+    fn test_silence() {
+        let max = 10;
+        for n in 0..=max {
+            let i = span!(Rational::new(n, max));
+            assert!(silence::<Rational>().query(i).next().is_none());
+        }
+    }
+
+    #[test]
+    fn test_pattern_reuse() {
+        let saw_ = saw();
+        let max = 10;
+        for n in 0..=max {
+            let i = span!(Rational::new(n, max));
+            let ev1 = saw_.query(i).next().unwrap();
+            let ev2 = saw().query(i).next().unwrap();
+            assert_eq!(ev1, ev2);
+        }
+    }
+
+    #[test]
+    fn test_atom() {
+        let span = span!(0 / 1, 3 / 1);
+        let pattern = atom("hello");
+        let mut values = pattern.query(span).map(|ev| ev.value);
         assert_eq!(Some("hello"), values.next());
         assert_eq!(Some("hello"), values.next());
         assert_eq!(Some("hello"), values.next());
+        assert_eq!(None, values.next());
     }
-    let event = events.next().unwrap();
-    let active = span!(3 / 1, 7 / 2);
-    let whole = Some(span!(3 / 1, 4 / 1));
-    assert_eq!(active, event.span.active);
-    assert_eq!(whole, event.span.whole);
-    assert_eq!(None, events.next());
-}
 
-#[test]
-fn test_debug() {
-    let p = atom("hello");
-    println!("{:?}", p.debug());
-    println!("{:?}", p.debug_span(span!(2 / 1, 7 / 2)));
-}
+    #[test]
+    fn test_atom_whole() {
+        let span = span!(0 / 1, 7 / 2);
+        let pattern = atom("hello");
+        let mut events = pattern.query(span);
+        {
+            let mut values = events.by_ref().map(|ev| ev.value);
+            assert_eq!(Some("hello"), values.next());
+            assert_eq!(Some("hello"), values.next());
+            assert_eq!(Some("hello"), values.next());
+        }
+        let event = events.next().unwrap();
+        let active = span!(3 / 1, 7 / 2);
+        let whole = Some(span!(3 / 1, 4 / 1));
+        assert_eq!(active, event.span.active);
+        assert_eq!(whole, event.span.whole);
+        assert_eq!(None, events.next());
+    }
 
-#[test]
-fn test_fit_span() {
-    let p = || atom("a");
-    let src = span!(0 / 1, 1 / 1);
-    let dst = span!(1 / 2, 3 / 4);
-    let pfs = fit_span(src, dst, p());
-    let mut es = pfs
-        .query(dst)
-        .map(|ev| (ev.value, ev.span.active, ev.span.whole));
-    assert_eq!(
-        es.next(),
-        Some(("a", span!(1 / 2, 3 / 4), Some(span!(1 / 2, 3 / 4)))),
-    );
-    assert!(es.next().is_none());
-    let pfc = fit_cycle(dst, p());
-    let pfs_es = pfs.query(span!(0 / 1, 4 / 1));
-    let pfc_es = pfc.query(span!(0 / 1, 4 / 1));
-    assert_eq!(pfs_es.collect::<Vec<_>>(), pfc_es.collect::<Vec<_>>());
-}
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_debug() {
+        let p = atom("hello");
+        println!("{:?}", p.debug());
+        println!("{:?}", p.debug_span(span!(2 / 1, 7 / 2)));
+    }
 
-#[test]
-fn test_phase() {
-    let p = atom(()).phase();
-    let span = span!(1 / 4, 3 / 4);
-    let mut es = p.query(span).map(|ev| ev.value);
-    assert_eq!(es.next(), Some([Rational::new(1, 4), Rational::new(3, 4)]));
-    assert!(es.next().is_none());
-    let span = span!(1 / 8, 3 / 2);
-    let mut es = p.query(span).map(|ev| ev.value);
-    assert_eq!(es.next(), Some([Rational::new(1, 8), Rational::new(1, 1)]));
-    assert_eq!(es.next(), Some([Rational::new(0, 1), Rational::new(1, 2)]));
-    assert!(es.next().is_none());
+    #[test]
+    fn test_fit_span() {
+        let p = || atom("a");
+        let src = span!(0 / 1, 1 / 1);
+        let dst = span!(1 / 2, 3 / 4);
+        let pfs = fit_span(src, dst, p());
+        let mut es = pfs
+            .query(dst)
+            .map(|ev| (ev.value, ev.span.active, ev.span.whole));
+        assert_eq!(
+            es.next(),
+            Some(("a", span!(1 / 2, 3 / 4), Some(span!(1 / 2, 3 / 4)))),
+        );
+        assert!(es.next().is_none());
+        let pfc = fit_cycle(dst, p());
+        let pfs_es = pfs.query(span!(0 / 1, 4 / 1));
+        let pfc_es = pfc.query(span!(0 / 1, 4 / 1));
+        assert_eq!(pfs_es.collect::<Vec<_>>(), pfc_es.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_phase() {
+        let p = atom(()).phase();
+        let span = span!(1 / 4, 3 / 4);
+        let mut es = p.query(span).map(|ev| ev.value);
+        assert_eq!(es.next(), Some([Rational::new(1, 4), Rational::new(3, 4)]));
+        assert!(es.next().is_none());
+        let span = span!(1 / 8, 3 / 2);
+        let mut es = p.query(span).map(|ev| ev.value);
+        assert_eq!(es.next(), Some([Rational::new(1, 8), Rational::new(1, 1)]));
+        assert_eq!(es.next(), Some([Rational::new(0, 1), Rational::new(1, 2)]));
+        assert!(es.next().is_none());
+    }
 }

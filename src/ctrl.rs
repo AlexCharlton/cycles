@@ -1,9 +1,12 @@
 //! Control patterns and related items.
 
+extern crate alloc;
+
 use crate::{atom, Pattern, Rational};
+use alloc::string::{String, ToString};
 
 /// A pattern value type that allows for representing a set of labelled controls.
-pub type Controls = std::collections::BTreeMap<String, Value>;
+pub type Controls = alloc::collections::BTreeMap<String, Value>;
 
 // These map directly to the OSC strings expected by superdirt.
 pub const SOUND: &str = "s";
@@ -35,8 +38,8 @@ impl From<String> for Value {
     }
 }
 
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for Value {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
             Value::String(val) => val.fmt(f),
             Value::Rational(val) => val.fmt(f),
@@ -51,7 +54,7 @@ where
     P: 'static + Pattern,
     P::Value: Clone + Into<String>,
 {
-    let f = |s: P::Value| std::iter::once((SOUND.to_string(), Value::String(s.into()))).collect();
+    let f = |s: P::Value| core::iter::once((SOUND.to_string(), Value::String(s.into()))).collect();
     pattern.app(atom(f))
 }
 
@@ -60,6 +63,6 @@ pub fn note<P>(pattern: P) -> impl Pattern<Value = Controls>
 where
     P: 'static + Pattern<Value = f64>,
 {
-    let f = |n| std::iter::once((NOTE.to_string(), Value::F64(n))).collect();
+    let f = |n| core::iter::once((NOTE.to_string(), Value::F64(n))).collect();
     pattern.app(atom(f))
 }

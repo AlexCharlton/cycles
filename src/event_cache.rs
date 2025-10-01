@@ -1,3 +1,7 @@
+extern crate alloc;
+
+use alloc::{vec, vec::Vec};
+
 use crate::{span::Span, Event, Pattern};
 
 #[derive(Debug)]
@@ -8,7 +12,7 @@ pub struct EventCache<T> {
     events: Vec<Event<T>>,
 }
 
-impl<T: std::fmt::Debug> EventCache<T> {
+impl<T: core::fmt::Debug> EventCache<T> {
     /// Cached span.
     pub fn span(&self) -> &Span {
         &self.span
@@ -37,7 +41,7 @@ impl<T: std::fmt::Debug> EventCache<T> {
         crate::slice::retain_intersecting(&mut self.events, new_span);
         // Find the new spans and query events for them.
         let (pre, post) = self.span.difference(new_span);
-        let old_evs = std::mem::replace(&mut self.events, vec![]);
+        let old_evs = core::mem::replace(&mut self.events, vec![]);
         let mut pre_evs: Vec<_> = pre
             .into_iter()
             .flat_map(|pre| {
@@ -74,7 +78,7 @@ impl<T> Default for EventCache<T> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::span;
 
@@ -106,6 +110,7 @@ mod test {
         let span = span!(0 / 1, 3 / 1);
         let events = pattern.query(span).collect();
         let mut cache = EventCache { span, events };
+        #[cfg(feature = "std")]
         dbg!(&cache);
         let new_span = span!(2 / 1, 5 / 1);
         cache.update(new_span, pattern);

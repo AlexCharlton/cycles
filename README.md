@@ -10,6 +10,9 @@ The goal of this crate is to aim for a similar level of ergonomics to
 TidalCycles (it's hard to compete with Haskell!), while taking advantage of
 Rust's ability to provide low-to-zero-cost abstractions.
 
+Using this crate without default features (specifically, the std feature)
+makes it no-std (but not no-alloc).
+
 ## The [`Pattern`] trait
 
 The essence of this crate is the [`Pattern`] trait. `Pattern`s are types

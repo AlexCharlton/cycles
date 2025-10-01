@@ -1,7 +1,7 @@
 //! The `Span` type and related items.
 
 use crate::Rational;
-use std::fmt;
+use core::fmt;
 
 /// A shorthand macro for constructing spans from rationals, e.g. `span!(0/1, 3/1)`.
 #[macro_export]
@@ -48,7 +48,7 @@ impl Span {
 
     pub fn cycles(self) -> impl Iterator<Item = Self> {
         let Span { mut start, end } = self;
-        std::iter::from_fn(move || {
+        core::iter::from_fn(move || {
             if start >= end {
                 None
             } else if start >= end.floor() {
@@ -86,8 +86,8 @@ impl Span {
     ///
     /// NOTE: If either span's `start` is equal to its `end`, `None` is returned.
     pub fn intersect(self, other: Self) -> Option<Self> {
-        let start = std::cmp::max(self.start, other.start);
-        let end = std::cmp::min(self.end, other.end);
+        let start = core::cmp::max(self.start, other.start);
+        let end = core::cmp::min(self.end, other.end);
         if end <= start {
             None
         } else {
@@ -104,12 +104,15 @@ impl Span {
         let pre = if self.start <= other.start {
             None
         } else {
-            Some(Span::new(other.start, std::cmp::min(self.start, other.end)))
+            Some(Span::new(
+                other.start,
+                core::cmp::min(self.start, other.end),
+            ))
         };
         let post = if other.end <= self.end {
             None
         } else {
-            Some(Span::new(std::cmp::max(self.end, other.start), other.end))
+            Some(Span::new(core::cmp::max(self.end, other.start), other.end))
         };
         (pre, post)
     }
@@ -140,6 +143,7 @@ fn test_span_macro() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn test_span_fmt() {
     for n in 0..10 {
         let a = Rational::new(n, 10);

@@ -10,8 +10,9 @@ repository = "https://github.com/mitchmindtree/cycles"
 rust-version = "1.65.0"
 
 [dependencies]
-num-rational = { version = "0.4", default-features = false, features = ["std"] }
+num-rational = { version = "0.4", default-features = false }
 
 [features]
-default = []
+default = ["std"]
+std = ["num-rational/std"]
 serde = ["num-rational/serde"]

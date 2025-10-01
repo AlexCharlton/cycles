@@ -1,14 +1,18 @@
 //! Items related to the `Pattern` implementation for slices.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use crate::{span::Span, Event, Pattern};
 
 /// An iterator produced by a query to a rendered slice of events.
 pub struct SliceEvents<'a, T> {
     span: Span,
-    /// Thes tart of the known, consistently intersecting range.
+    /// The start of the known, consistently intersecting range.
     consistently_intersecting_start: usize,
     /// Enumerated events, excluding non-intersecting tail events.
-    events: std::iter::Enumerate<std::slice::Iter<'a, Event<T>>>,
+    events: core::iter::Enumerate<core::slice::Iter<'a, Event<T>>>,
 }
 
 impl<'a, T> Pattern for &'a [Event<T>] {
@@ -43,7 +47,7 @@ impl<'a, T> Iterator for SliceEvents<'a, T> {
             // Otherwise, assume the `start` is already in range to
             // reduce expensive `Rational` comparisons.
             } else {
-                active.end = std::cmp::min(active.end, self.span.end);
+                active.end = core::cmp::min(active.end, self.span.end);
                 return Some(Event::new(&ev.value, active, ev.span.whole));
             };
         }
@@ -90,22 +94,22 @@ pub fn retain_intersecting<T>(events: &mut Vec<Event<T>>, span: Span) {
 pub fn range_consistently_intersecting<T>(
     events: &[Event<T>],
     span: Span,
-) -> std::ops::Range<usize> {
+) -> core::ops::Range<usize> {
     let first_event_with_start_gte_span_start = events
         .binary_search_by(|ev| {
             if ev.span.whole_or_active().start < span.start {
-                std::cmp::Ordering::Less
+                core::cmp::Ordering::Less
             } else {
-                std::cmp::Ordering::Greater
+                core::cmp::Ordering::Greater
             }
         })
         .unwrap_or_else(|ix| ix);
     let first_event_with_start_gte_span_end = events
         .binary_search_by(|ev| {
             if ev.span.whole_or_active().start < span.end {
-                std::cmp::Ordering::Less
+                core::cmp::Ordering::Less
             } else {
-                std::cmp::Ordering::Greater
+                core::cmp::Ordering::Greater
             }
         })
         .unwrap_or_else(|ix| ix);
@@ -113,7 +117,7 @@ pub fn range_consistently_intersecting<T>(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::span;
 

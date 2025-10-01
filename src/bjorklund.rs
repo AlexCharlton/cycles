@@ -1,7 +1,10 @@
-use std::{
-    iter::{Chain, Flatten},
-    vec::IntoIter,
+extern crate alloc;
+
+use alloc::{
+    vec,
+    vec::{IntoIter, Vec},
 };
+use core::iter::{Chain, Flatten};
 
 /// The iterator type returned by [`bjorklund`].
 ///
