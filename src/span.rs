@@ -28,6 +28,7 @@ macro_rules! span {
 
 /// A rational range over a single dimension, represented with a start and end.
 #[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     pub start: Rational,
     pub end: Rational,

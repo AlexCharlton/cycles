@@ -435,6 +435,12 @@ pub struct PatternDebug<'p, V, E> {
 
 /// An event yielded by a pattern query, see [`Pattern::query`].
 #[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "T: serde::Serialize")))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "T: serde::Deserialize<'de>"))
+)]
 pub struct Event<T> {
     /// The span of the event (both "active" and "whole" parts).
     pub span: EventSpan,
@@ -458,6 +464,7 @@ pub struct ApplyEvent<T> {
 
 /// The span associated with a single event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventSpan {
     /// The span within which the active part is relevant.
     /// Also referred to as the event "structure".
