@@ -955,7 +955,14 @@ where
             let ixr = rem_euclid(sam, Rational::from(ps_len));
             let ix = usize::try_from(ixr.to_integer()).expect("failed to cast index to usize");
             let p = &ps[ix];
-            p.query(cycle)
+
+            // Calculate the time offset to ensure each pattern starts from time 0
+            let offset = sam - (cycle.start / ps_len).floor();
+            let adjusted_cycle = cycle.map(|p| p - offset);
+            // Query the pattern with the adjusted cycle
+            p.query(adjusted_cycle)
+                // Adjust the event spans back to global time coordinates
+                .map(move |event| event.map_points(|t| t + offset))
         })
     }
 }
@@ -1113,6 +1120,7 @@ pub fn fit_cycle<T>(dst: Span, p: impl 'static + Pattern<Value = T>) -> impl Pat
     fit_span(span!(0 / 1, 1 / 1), dst, p)
 }
 
+/// The remainder of `r` divided by `d` using the euclidean algorithm.
 fn rem_euclid(r: Rational, d: Rational) -> Rational {
     r - (d * (r / d).floor())
 }
@@ -1385,6 +1393,25 @@ mod tests {
             Some(("a", span!(1 / 1, 5 / 4), Some(span!(1 / 1, 3 / 2)))),
             es.next()
         );
+        assert_eq!(None, es.next());
+    }
+
+    #[test]
+    fn test_embedded_slowcat() {
+        let p = m![a b <(c d)> e];
+        let span = span!(0 / 1, 2 / 1);
+        let mut es = p.query(span).map(|ev| {
+            assert_eq!(ev.span.whole, Some(ev.span.active));
+            (ev.value, ev.span.active)
+        });
+        assert_eq!(Some(("a", span!(0 / 1, 1 / 4))), es.next());
+        assert_eq!(Some(("b", span!(1 / 4, 1 / 2))), es.next());
+        assert_eq!(Some(("c", span!(1 / 2, 3 / 4))), es.next());
+        assert_eq!(Some(("e", span!(3 / 4, 1 / 1))), es.next());
+        assert_eq!(Some(("a", span!(1 / 1, 5 / 4))), es.next());
+        assert_eq!(Some(("b", span!(5 / 4, 3 / 2))), es.next());
+        assert_eq!(Some(("d", span!(3 / 2, 7 / 4))), es.next());
+        assert_eq!(Some(("e", span!(7 / 4, 2 / 1))), es.next());
         assert_eq!(None, es.next());
     }
 

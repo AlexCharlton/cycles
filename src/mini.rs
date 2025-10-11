@@ -156,6 +156,7 @@ mod tests {
     fn test_slowcat() {
         use crate::span;
         dbg!(m![a b <(c d)>].debug_span(span!(0 / 1, 4 / 1)));
+        dbg!(m![a b <(c d)> e].debug_span(span!(0 / 1, 2 / 1)));
     }
 
     #[test]
