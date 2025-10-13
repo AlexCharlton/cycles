@@ -190,40 +190,6 @@ pub trait Pattern {
 
     /// Apply the given pattern of functions to `self`.
     ///
-    /// The resulting pattern yields an event at each the intersection of each
-    /// of the active spans. The function must return the value along with the
-    /// `whole` span, which should either come from one of the intersecting
-    /// events, or the intersection of the two.
-    fn apply_with<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
-    where
-        Self: 'static + Sized,
-        Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
-        F: Fn(ApplyEvent<Self::Value>) -> (B, Option<Span>),
-    {
-        let apply = Arc::new(apply);
-        move |span: Span| {
-            let apply = apply.clone();
-            self.query(span).flat_map(move |ev| {
-                apply.query(span).flat_map(move |ef| {
-                    let ev = ev.clone();
-                    ev.span.active.intersect(ef.span.active).map(|active| {
-                        let new = ApplyEvent {
-                            value: ev.value,
-                            active,
-                            left: EventSpan::new(ev.span.active, ev.span.whole),
-                            right: EventSpan::new(ef.span.active, ef.span.whole),
-                        };
-                        let (value, whole) = (ef.value)(new);
-                        Event::new(value, active, whole)
-                    })
-                })
-            })
-        }
-    }
-
-    /// Apply the given pattern of functions to `self`.
-    ///
     /// Yields an event at each intersection between the active spans of `self` and `apply`.
     ///
     /// The resulting structure is determined by the given function `structure`
@@ -238,18 +204,28 @@ pub trait Pattern {
         G: 'static + Fn(Span, Span) -> Span,
     {
         let structure = Arc::new(structure);
-        let apply = apply.map(move |f| {
+        let apply = Arc::new(apply);
+
+        move |span: Span| {
             let structure = structure.clone();
-            move |e: ApplyEvent<_>| {
-                let value = f(e.value);
-                let whole = e
-                    .left
-                    .whole
-                    .and_then(|lw| e.right.whole.map(|rw| (*structure)(lw, rw)));
-                (value, whole)
-            }
-        });
-        self.apply_with(apply)
+            let apply = apply.clone();
+            self.query(span).flat_map(move |ev| {
+                let structure = structure.clone();
+                apply.query(span).flat_map(move |ef| {
+                    let structure = structure.clone();
+                    let ev = ev.clone();
+                    ev.span.active.intersect(ef.span.active).map(|active| {
+                        let whole = ev
+                            .span
+                            .whole
+                            .and_then(|lw| ef.span.whole.map(|rw| (*structure)(lw, rw)));
+
+                        let value = (ef.value)(ev.value);
+                        Event::new(value, active, whole)
+                    })
+                })
+            })
+        }
     }
 
     /// Apply the given pattern of functions to `self`.
@@ -272,9 +248,7 @@ pub trait Pattern {
 
     /// Apply the given pattern of functions to `self`.
     ///
-    /// Yields an event at each intersection between the active spans of `self` and `apply`.
-    ///
-    /// The resulting structure is carried from the left (i.e. `self`).
+    /// Similar to `apply`, but the structure of the resulting event is carried from the left (i.e. `self`).
     fn appl<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
     where
         Self: 'static + Sized,
@@ -282,14 +256,25 @@ pub trait Pattern {
         P: 'static + Pattern<Value = F>,
         F: Fn(Self::Value) -> B,
     {
-        self.apply(apply, |l, _| l)
+        let apply = Arc::new(apply);
+
+        move |span: Span| {
+            let apply = apply.clone();
+            self.query(span).flat_map(move |ev| {
+                apply.query(ev.span.whole_or_active()).flat_map(move |ef| {
+                    let ev = ev.clone();
+                    ev.span.active.intersect(ef.span.active).map(|active| {
+                        let value = (ef.value)(ev.value);
+                        Event::new(value, active, ev.span.whole)
+                    })
+                })
+            })
+        }
     }
 
     /// Apply the given pattern of functions to `self`.
     ///
-    /// Yields an event at each intersection between the active spans of `self` and `apply`.
-    ///
-    /// The resulting structure is carried from the right (i.e. the `apply` pattern).
+    /// Similar to `apply`, but the structure of the resulting event is carried from the right (i.e. `apply`).
     fn appr<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
     where
         Self: 'static + Sized,
@@ -297,12 +282,26 @@ pub trait Pattern {
         P: 'static + Pattern<Value = F>,
         F: Fn(Self::Value) -> B,
     {
-        self.apply(apply, |_, r| r)
+        let apply = Arc::new(apply);
+        let this = Arc::new(self);
+
+        move |span: Span| {
+            let apply = apply.clone();
+            let this = this.clone();
+            apply.query(span).flat_map(move |ef| {
+                this.query(ef.span.whole_or_active()).flat_map(move |ev| {
+                    ev.span.active.intersect(ef.span.active).map(|active| {
+                        let value = (ef.value)(ev.value);
+                        Event::new(value, active, ef.span.whole)
+                    })
+                })
+            })
+        }
     }
 
     /// Merge the given pattern by calling the given function for each value at
     /// each active span intersection.
-    fn merge_with<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    fn merge<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
@@ -318,6 +317,42 @@ pub trait Pattern {
         self.app(apply)
     }
 
+    /// Merge the given pattern by calling the given function for each value at
+    /// each active span intersection. The structure of the resulting event is carried from the left (i.e. `self`).
+    fn merge_left<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    where
+        Self: 'static + Sized,
+        Self::Value: Clone,
+        P: 'static + Pattern,
+        P::Value: Clone,
+        F: 'static + Fn(Self::Value, P::Value) -> T,
+    {
+        let merge = Arc::new(merge);
+        let apply = other.map(move |o: P::Value| {
+            let f = merge.clone();
+            move |s: Self::Value| (*f)(s, o.clone())
+        });
+        self.appl(apply)
+    }
+
+    /// Merge the given pattern by calling the given function for each value at
+    /// each active span intersection. The structure of the resulting event is carried from the right (i.e. `other`).
+    fn merge_right<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    where
+        Self: 'static + Sized,
+        Self::Value: Clone,
+        P: 'static + Pattern,
+        P::Value: Clone,
+        F: 'static + Fn(Self::Value, P::Value) -> T,
+    {
+        let merge = Arc::new(merge);
+        let apply = other.map(move |o: P::Value| {
+            let f = merge.clone();
+            move |s: Self::Value| (*f)(s, o.clone())
+        });
+        self.appr(apply)
+    }
+
     /// Merge the given pattern by calling `Extend<P::Value>` for each value at
     /// intersections of active spans.
     ///
@@ -330,7 +365,7 @@ pub trait Pattern {
         P: 'static + Pattern,
         P::Value: Clone + IntoIterator,
     {
-        self.merge_with(other, |mut s, o| {
+        self.merge(other, |mut s, o| {
             s.extend(o);
             s
         })
@@ -445,20 +480,6 @@ pub struct Event<T> {
     /// The span of the event (both "active" and "whole" parts).
     pub span: EventSpan,
     /// The value associated with the event.
-    pub value: T,
-}
-
-/// Context given to a `Pattern::apply_with` function that can be used to
-/// produce the applied event along with its associated structure.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
-pub struct ApplyEvent<T> {
-    /// The span of the left event (normally provided by `self`).
-    pub left: EventSpan,
-    /// The span of the right event (normally provided by the pattern of functions).
-    pub right: EventSpan,
-    /// The intersection of each event's active span.
-    pub active: Span,
-    /// The value from the "left" event (normally provided by `self`) that is to be mapped.
     pub value: T,
 }
 
@@ -1307,8 +1328,8 @@ mod tests {
 
     #[test]
     fn test_apply() {
-        let a = atom(1.0).rate(2.into());
-        let b = atom(|v| v + 2.0).rate(3.into());
+        let a = m![2.0 10.0];
+        let b = m![1.0 3.0 5.0].map(|x| move |y| x + y);
         let p = a.app(b);
         let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
         // cycle1                        cycle2
@@ -1322,9 +1343,118 @@ mod tests {
         let s2 = span!(1 / 2, 2 / 3);
         let s3 = span!(2 / 3, 1 / 1);
         assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(3.0, s1, Some(s1)));
-        assert_eq!(v[2], Event::new(3.0, s2, Some(s2)));
-        assert_eq!(v[3], Event::new(3.0, s3, Some(s3)));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(s1)));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(s2)));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn test_appl() {
+        // When applying a signal (which has no wholes of its own) to a pattern, the structure comes entirely from the pattern.
+        let a = m![2.0 4.0];
+        let b = signal(|v: Rational| v.to_f64_lossy()).map(|x| move |y| x + y);
+        let p = a.appl(b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // 0/1            1/2            1/1
+        // 1              2
+        // |              |              |
+
+        let s0 = span!(0 / 1, 1 / 2);
+        let s1 = span!(1 / 2, 1 / 1);
+        assert_eq!(v[0], Event::new(2.25, s0, Some(s0)));
+        assert_eq!(v[1], Event::new(4.75, s1, Some(s1)));
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn test_appr() {
+        // When applying a signal (which has no wholes of its own) to a pattern, the structure comes entirely from the pattern.
+        let a = signal(|v: Rational| v.to_f64_lossy());
+        let b = m![2.0 4.0].map(|x| move |y| x + y);
+        let p = a.appr(b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // 0/1            1/2            1/1
+        // 1              2
+        // |              |              |
+
+        let s0 = span!(0 / 1, 1 / 2);
+        let s1 = span!(1 / 2, 1 / 1);
+        assert_eq!(v[0], Event::new(2.25, s0, Some(s0)));
+        assert_eq!(v[1], Event::new(4.75, s1, Some(s1)));
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn test_merge() {
+        let a = m![2.0 10.0];
+        let b = m![1.0 3.0 5.0];
+        let p = a.merge(b, |a, b| a + b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // b         b         b
+        // 0/1       1/3  1/2  2/3       1/1
+        // 1         2    3    4
+        // |         |    |    |         |
+        let s0 = span!(0 / 1, 1 / 3);
+        let s1 = span!(1 / 3, 1 / 2);
+        let s2 = span!(1 / 2, 2 / 3);
+        let s3 = span!(2 / 3, 1 / 1);
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(s1)));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(s2)));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn test_merge_left() {
+        let a = m![2.0 10.0];
+        let b = m![1.0 3.0 5.0];
+        let p = a.merge_left(b, |a, b| a + b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // b         b         b
+        // 0/1       1/3  1/2  2/3       1/1
+        // 1         2    3    4
+        // |         |    |    |         |
+        let s0 = span!(0 / 1, 1 / 3);
+        let s1 = span!(1 / 3, 1 / 2);
+        let s2 = span!(1 / 2, 2 / 3);
+        let s3 = span!(2 / 3, 1 / 1);
+        assert_eq!(v[0], Event::new(3.0, s0, Some(span!(0 / 1, 1 / 2))));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(0 / 1, 1 / 2))));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 2, 1 / 1))));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(span!(1 / 2, 1 / 1))));
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn test_merge_right() {
+        let a = m![2.0 10.0];
+        let b = m![1.0 3.0 5.0];
+        let p = a.merge_right(b, |a, b| a + b);
+        let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
+        // cycle1                        cycle2
+        // a              a
+        // b         b         b
+        // 0/1       1/3  1/2  2/3       1/1
+        // 1         2    3    4
+        // |         |    |    |         |
+        let s0 = span!(0 / 1, 1 / 3);
+        let s1 = span!(1 / 3, 1 / 2);
+        let s2 = span!(1 / 2, 2 / 3);
+        let s3 = span!(2 / 3, 1 / 1);
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(1 / 3, 2 / 3))));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 3, 2 / 3))));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
         assert_eq!(v.len(), 4);
     }
 
