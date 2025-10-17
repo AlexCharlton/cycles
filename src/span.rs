@@ -1,6 +1,8 @@
 //! The `Span` type and related items.
+extern crate alloc;
 
 use crate::Rational;
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::fmt;
 
 /// A shorthand macro for constructing spans from rationals, e.g. `span!(0/1, 3/1)`.
@@ -64,6 +66,53 @@ impl Span {
                 };
                 start = this_end;
                 Some(span)
+            }
+        })
+    }
+
+    pub fn step_cycles(self, steps: impl Iterator<Item = Rational>) -> impl Iterator<Item = Self> {
+        let Span { mut start, end } = self;
+        let steps = Arc::new(steps.collect::<Vec<_>>());
+        let total_length: Rational = steps.iter().sum();
+        let mut onsets = vec![Rational::from(0)];
+        for step in steps.iter() {
+            onsets.push(onsets.last().unwrap() + step);
+        }
+        let current_position = crate::rem_euclid(start, total_length);
+        let mut ix = onsets
+            .iter()
+            .position(|s| s > &current_position)
+            .unwrap_or(onsets.len())
+            - 1;
+        let mut next_end =
+            ((start / total_length).floor() * total_length) + onsets[(ix + 1) % steps.len()];
+
+        core::iter::from_fn(move || {
+            if start >= end {
+                None
+            } else {
+                if next_end >= end {
+                    let span = Span { start, end };
+                    start = end;
+
+                    ix = (ix + 1) % steps.len();
+                    let step = steps[ix];
+                    next_end = start + step;
+
+                    Some(span)
+                } else {
+                    let span = Span {
+                        start,
+                        end: next_end,
+                    };
+
+                    start = next_end;
+                    ix = (ix + 1) % steps.len();
+                    let step = steps[ix];
+                    next_end = start + step;
+
+                    Some(span)
+                }
             }
         })
     }

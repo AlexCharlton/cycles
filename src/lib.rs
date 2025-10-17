@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     ops::{Add, Mul, Sub},
@@ -1003,50 +1003,72 @@ where
 }
 
 /// Like [fastcat] but allows the user to provide proportionate sizes for each pattern.
-// TODO: Can we not implement this in terms of `rate` and `slowcat`/`fastcat`?
 pub fn timecat<I, P>(patterns: I) -> impl Pattern<Value = P::Value>
 where
     I: IntoIterator<Item = (Rational, P)>,
     I::IntoIter: ExactSizeIterator,
     P: Pattern,
 {
-    // Collect the patterns while summing the ratio.
-    let mut total_ratio = Rational::default();
-    let patterns: Vec<(Rational, P)> = patterns
-        .into_iter()
-        .inspect(|(r, _)| total_ratio += r)
-        .collect();
-    // Map the ratios into spans within a single cycle.
-    let mut start = Rational::default();
-    let patterns: Arc<[(Span, P)]> = patterns
-        .into_iter()
-        .map(|(r, p)| {
-            let len = r / total_ratio;
-            let end = start + len;
-            let span = Span::new(start, end);
-            start = end;
-            (span, p)
-        })
-        .collect();
-    // Create a pattern, checking for intersections between query span cycles and pattern spans.
+    // Collect the patterns while summing the steps
+    let mut onsets = vec![Rational::from(0)];
+    let mut steps = vec![];
+    // Filter out patterns with a step length of 0 and collect the steps, onsets, patterns
+    let patterns: Arc<Vec<P>> = Arc::new(
+        patterns
+            .into_iter()
+            .flat_map(|(r, p)| {
+                if r > Rational::from(0) {
+                    steps.push(r);
+                    onsets.push(onsets.last().unwrap() + r);
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    );
+    let total_length = onsets.pop().unwrap();
+    let onsets = Arc::new(onsets);
+
     move |span: Span| {
         let ps = patterns.clone();
-        span.cycles().flat_map(move |cycle| {
-            let sam = cycle.start.floor();
-            let ps = ps.clone();
-            (0..ps.len())
-                .filter_map(move |i| {
-                    let (p_span, pattern) = &ps[i];
-                    let p_span = p_span.map(|r| r + sam);
-                    cycle.intersect(p_span).map(|sect| {
-                        pattern.query(sect).map(move |mut ev| {
-                            ev.span.whole = Some(p_span);
-                            ev
+        let onsets = onsets.clone();
+        let steps = steps.clone();
+
+        // Scale the span to match the total length of the patterns
+        let scaled_span = span.map(|r| r * total_length);
+        scaled_span
+            .step_cycles(steps.clone().into_iter())
+            .flat_map(move |cycle| {
+                let current_step = rem_euclid(cycle.start, total_length);
+                // Find the index of the current step in the onsets vector
+                let ix = onsets
+                    .iter()
+                    .position(|s| s > &current_step)
+                    .unwrap_or(onsets.len())
+                    - 1;
+
+                let p = &ps[ix];
+                let step_length = steps[ix];
+
+                // Calculate the time offset to ensure each pattern starts from time 0
+                // TODO: Fix the offset
+                // let offset = start - (cycle.start / total_length).floor();
+                let whole_cycle_offset = (cycle.start / total_length).floor();
+                let zeroing_offset = (whole_cycle_offset * total_length) + onsets[ix];
+                // Adjust the cycle to both start from 0 and scale it to match the step length
+                let adjusted_cycle =
+                    cycle.map(|p| ((p - zeroing_offset) / step_length) + whole_cycle_offset);
+                // Query the pattern with the adjusted cycle, but slow down the rate to match the step length
+                p.query(adjusted_cycle)
+                    // Adjust the event spans back to global time coordinates
+                    .map(move |event| {
+                        event.map_points(|t| {
+                            (((t - whole_cycle_offset) * step_length) + zeroing_offset)
+                                / total_length
                         })
                     })
-                })
-                .flatten()
-        })
+            })
     }
 }
 
@@ -1546,13 +1568,16 @@ mod tests {
     }
 
     #[test]
-    fn test_timecat() {
+    fn test_timecat1() {
         let a = atom("a");
         let b = atom("b");
         let cat = timecat([(Rational::from(1), a), (Rational::from(2), b)]);
         let span = span!(1 / 4, 3 / 2);
-        #[cfg(feature = "std")]
-        dbg!(cat.debug_span(span));
+        // 0 | | | | | 1 | | | | | 2
+        // | a |   b   | a |   b   |
+        //    |-----span-----|
+
+        // dbg!(cat.debug_span(span));
         let mut es = cat
             .query(span)
             .map(|ev| (ev.value, ev.span.active, ev.span.whole));
@@ -1572,6 +1597,59 @@ mod tests {
             es.next(),
             Some(("b", span!(4 / 3, 3 / 2), Some(span!(4 / 3, 2 / 1)))),
         );
+        assert_eq!(es.next(), None);
+    }
+
+    #[test]
+    fn test_timecat2() {
+        let a = atom("a");
+        let b = atom("b");
+        let cat = timecat([(Rational::from(2), a), (Rational::from(1), b)]);
+        let span = span!(5 / 4, 5 / 2);
+        // 0 | | | | | 1 | | | | | 2 | | | | | 3
+        // |   a   | b |   a   | b |   a   | b |
+        //                |-----span-----|
+        let mut es = cat
+            .query(span)
+            .map(|ev| (ev.value, ev.span.active, ev.span.whole));
+        assert_eq!(
+            es.next(),
+            Some(("a", span!(5 / 4, 5 / 3), Some(span!(3 / 3, 5 / 3)))),
+        );
+        assert_eq!(
+            es.next(),
+            Some(("b", span!(5 / 3, 6 / 3), Some(span!(5 / 3, 6 / 3)))),
+        );
+        assert_eq!(
+            es.next(),
+            Some(("a", span!(6 / 3, 5 / 2), Some(span!(6 / 3, 8 / 3)))),
+        );
+
+        assert_eq!(es.next(), None);
+    }
+
+    #[test]
+    fn test_timecat3() {
+        let a = m![1 2].into_dyn();
+        let b = m![3 4].into_dyn();
+        let c = m![5 6].into_dyn();
+        let p = timecat([
+            (Rational::from(1), a),
+            (Rational::from(3), b),
+            (Rational::from(2), c),
+        ]);
+        let span = span!(0 / 1, 1 / 1);
+        // dbg!(p.debug_span(span));
+        let mut es = p.query(span).map(|ev| {
+            assert_eq!(ev.span.whole, Some(ev.span.active));
+            (ev.value, ev.span.active)
+        });
+        assert_eq!(es.next(), Some((1, span!(0 / 12, 1 / 12))));
+        assert_eq!(es.next(), Some((2, span!(1 / 12, 2 / 12))));
+        assert_eq!(es.next(), Some((3, span!(2 / 12, 5 / 12))));
+        assert_eq!(es.next(), Some((4, span!(5 / 12, 8 / 12))));
+        assert_eq!(es.next(), Some((5, span!(8 / 12, 10 / 12))));
+        assert_eq!(es.next(), Some((6, span!(10 / 12, 12 / 12))));
         assert_eq!(es.next(), None);
     }
 
