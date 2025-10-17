@@ -1010,7 +1010,6 @@ where
     P: Pattern,
 {
     // Collect the patterns while summing the steps
-    let mut onsets = vec![Rational::from(0)];
     let mut steps = vec![];
     // Filter out patterns with a step length of 0 and collect the steps, onsets, patterns
     let patterns: Arc<Vec<P>> = Arc::new(
@@ -1019,7 +1018,6 @@ where
             .flat_map(|(r, p)| {
                 if r > Rational::from(0) {
                     steps.push(r);
-                    onsets.push(onsets.last().unwrap() + r);
                     Some(p)
                 } else {
                     None
@@ -1027,39 +1025,29 @@ where
             })
             .collect(),
     );
-    let total_length = onsets.pop().unwrap();
-    let onsets = Arc::new(onsets);
+    let total_length = steps.iter().sum::<Rational>();
 
     move |span: Span| {
         let ps = patterns.clone();
-        let onsets = onsets.clone();
         let steps = steps.clone();
 
         // Scale the span to match the total length of the patterns
         let scaled_span = span.map(|r| r * total_length);
-        scaled_span
-            .step_cycles(steps.clone().into_iter())
-            .flat_map(move |cycle| {
-                let current_step = rem_euclid(cycle.start, total_length);
-                // Find the index of the current step in the onsets vector
-                let ix = onsets
-                    .iter()
-                    .position(|s| s > &current_step)
-                    .unwrap_or(onsets.len())
-                    - 1;
 
+        // Get the spans for each step and query the pattern after adjusting these steps
+        scaled_span.step_cycles(steps.clone().into_iter()).flat_map(
+            move |(active_cycle, whole_cycle, ix)| {
                 let p = &ps[ix];
                 let step_length = steps[ix];
 
-                // Calculate the time offset to ensure each pattern starts from time 0
-                // TODO: Fix the offset
-                // let offset = start - (cycle.start / total_length).floor();
-                let whole_cycle_offset = (cycle.start / total_length).floor();
-                let zeroing_offset = (whole_cycle_offset * total_length) + onsets[ix];
-                // Adjust the cycle to both start from 0 and scale it to match the step length
+                // Calculate the time offset to ensure each pattern starts from time 0 + whatever whole cycle offset is needed
+                let whole_cycle_offset = (active_cycle.start / total_length).floor();
+                let zeroing_offset =
+                    (whole_cycle.start % total_length) + whole_cycle_offset * total_length;
+                // Adjust the cycle offset and scale it to match the step length
                 let adjusted_cycle =
-                    cycle.map(|p| ((p - zeroing_offset) / step_length) + whole_cycle_offset);
-                // Query the pattern with the adjusted cycle, but slow down the rate to match the step length
+                    active_cycle.map(|p| ((p - zeroing_offset) / step_length) + whole_cycle_offset);
+                // Query the pattern with the adjusted cycle
                 p.query(adjusted_cycle)
                     // Adjust the event spans back to global time coordinates
                     .map(move |event| {
@@ -1068,7 +1056,8 @@ where
                                 / total_length
                         })
                     })
-            })
+            },
+        )
     }
 }
 
@@ -1275,8 +1264,7 @@ mod tests {
         let test = (-9..=0).rev().map(Rational::from);
         let expected = [0, 2, 1].into_iter().cycle().map(Rational::from);
         for (a, b) in test.zip(expected) {
-            #[cfg(feature = "std")]
-            dbg!(a, rem_euclid(a, d));
+            // dbg!(a, rem_euclid(a, d));
             assert_eq!(rem_euclid(a, d), b);
         }
 
@@ -1338,8 +1326,7 @@ mod tests {
     #[test]
     fn test_merge_extend() {
         let p = ctrl::sound(atom("hello")).merge_extend(ctrl::note(atom(4.0)));
-        #[cfg(feature = "std")]
-        dbg!(p.debug_span(span!(0 / 1, 4 / 1)));
+        // dbg!(p.debug_span(span!(0 / 1, 4 / 1)));
         let mut cycle = p.query(span!(0 / 1, 1 / 1));
         let mut expected = alloc::collections::BTreeMap::new();
         expected.insert(ctrl::SOUND.to_string(), ctrl::Value::String("hello".into()));
@@ -1609,6 +1596,8 @@ mod tests {
         // 0 | | | | | 1 | | | | | 2 | | | | | 3
         // |   a   | b |   a   | b |   a   | b |
         //                |-----span-----|
+
+        // dbg!(cat.debug_span(span));
         let mut es = cat
             .query(span)
             .map(|ev| (ev.value, ev.span.active, ev.span.whole));
