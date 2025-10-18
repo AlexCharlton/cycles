@@ -246,6 +246,42 @@ pub trait Pattern {
         })
     }
 
+    /// Apply the given pattern of functions to `self`. The resulting events are the intersection of the active spans of `self` and `apply`.
+    ///
+    /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
+    fn apply_events<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    where
+        Self: 'static + Sized,
+        Self::Value: Clone,
+        P: 'static + Pattern<Value = F>,
+        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+    {
+        let apply = Arc::new(apply);
+
+        move |span: Span| {
+            let apply = apply.clone();
+            self.query(span).flat_map(move |l| {
+                apply.query(span).flat_map(move |r| {
+                    let l = l.clone();
+                    l.span
+                        .active
+                        .intersect(r.span.active)
+                        .into_iter()
+                        .flat_map(move |active| {
+                            let whole = l.span.whole.and_then(|lw| {
+                                r.span.whole.map(|rw| {
+                                    lw.intersect(rw)
+                                        .expect("if `active` spans intersect, `whole` must too")
+                                })
+                            });
+
+                            (r.value)(Event::new(l.value.clone(), active, whole))
+                        })
+                })
+            })
+        }
+    }
+
     /// Apply the given pattern of functions to `self`.
     ///
     /// Similar to `apply`, but the structure of the resulting event is carried from the left (i.e. `self`).
@@ -260,13 +296,42 @@ pub trait Pattern {
 
         move |span: Span| {
             let apply = apply.clone();
-            self.query(span).flat_map(move |ev| {
-                apply.query(ev.span.whole_or_active()).flat_map(move |ef| {
-                    let ev = ev.clone();
-                    ev.span.active.intersect(ef.span.active).map(|active| {
-                        let value = (ef.value)(ev.value);
-                        Event::new(value, active, ev.span.whole)
+            self.query(span).flat_map(move |l| {
+                apply.query(l.span.whole_or_active()).flat_map(move |r| {
+                    let l = l.clone();
+                    l.span.active.intersect(r.span.active).map(|active| {
+                        let value = (r.value)(l.value);
+                        Event::new(value, active, l.span.whole)
                     })
+                })
+            })
+        }
+    }
+
+    /// Apply the given pattern of functions to `self` from the left (i.e. `self`).
+    ///
+    /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
+    fn apply_events_left<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    where
+        Self: 'static + Sized,
+        Self::Value: Clone,
+        P: 'static + Pattern<Value = F>,
+        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+    {
+        let apply = Arc::new(apply);
+
+        move |span: Span| {
+            let apply = apply.clone();
+            self.query(span).flat_map(move |l| {
+                apply.query(l.span.whole_or_active()).flat_map(move |r| {
+                    let l = l.clone();
+                    l.span
+                        .active
+                        .intersect(r.span.active)
+                        .into_iter()
+                        .flat_map(move |active| {
+                            (r.value)(Event::new(l.value.clone(), active, l.span.whole))
+                        })
                 })
             })
         }
@@ -288,12 +353,44 @@ pub trait Pattern {
         move |span: Span| {
             let apply = apply.clone();
             let this = this.clone();
-            apply.query(span).flat_map(move |ef| {
-                this.query(ef.span.whole_or_active()).flat_map(move |ev| {
-                    ev.span.active.intersect(ef.span.active).map(|active| {
-                        let value = (ef.value)(ev.value);
-                        Event::new(value, active, ef.span.whole)
+            apply.query(span).flat_map(move |r| {
+                this.query(r.span.whole_or_active()).flat_map(move |l| {
+                    l.span.active.intersect(r.span.active).map(|active| {
+                        let value = (r.value)(l.value);
+                        Event::new(value, active, r.span.whole)
                     })
+                })
+            })
+        }
+    }
+
+    /// Apply the given pattern of functions to `self` from the right (i.e. `apply`).
+    ///
+    /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
+    fn apply_events_right<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    where
+        Self: 'static + Sized,
+        Self::Value: Clone,
+        P: 'static + Pattern<Value = F>,
+        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+    {
+        let apply = Arc::new(apply);
+        let this = Arc::new(self);
+
+        move |span: Span| {
+            let apply = apply.clone();
+            let this = this.clone();
+            apply.query(span).flat_map(move |r| {
+                let r = Arc::new(r);
+                this.query(r.span.whole_or_active()).flat_map(move |l| {
+                    let r = r.clone();
+                    l.span
+                        .active
+                        .intersect(r.span.active)
+                        .into_iter()
+                        .flat_map(move |active| {
+                            (r.value)(Event::new(l.value.clone(), active, r.span.whole))
+                        })
                 })
             })
         }
