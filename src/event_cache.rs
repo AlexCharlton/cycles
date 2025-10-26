@@ -2,24 +2,24 @@ extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 
-use crate::{span::Span, Event, Pattern};
+use crate::{span::Span, Context, Event, Pattern};
 
 #[derive(Debug)]
-pub struct EventCache<T> {
+pub struct EventCache<T, C: Context> {
     /// The span of time over which events are currently cached.
     span: Span,
     /// The cached events, all of which have active spans that intersect `span`.
-    events: Vec<Event<T>>,
+    events: Vec<Event<T, C>>,
 }
 
-impl<T: core::fmt::Debug> EventCache<T> {
+impl<T: core::fmt::Debug, C: Context> EventCache<T, C> {
     /// Cached span.
     pub fn span(&self) -> &Span {
         &self.span
     }
 
     /// Cached events.
-    pub fn events(&self) -> &[Event<T>] {
+    pub fn events(&self) -> &[Event<T, C>] {
         &self.events
     }
 
@@ -36,7 +36,7 @@ impl<T: core::fmt::Debug> EventCache<T> {
     /// and `new_span` to reduce the load on calls to `query`.
     ///
     /// Returns whether or not the cache was mutated in some way.
-    pub fn update(&mut self, new_span: Span, pattern: impl Pattern<Value = T>) {
+    pub fn update(&mut self, new_span: Span, pattern: impl Pattern<Value = T, Context = C>) {
         // First, remove events that no longer intersect the new span.
         crate::slice::retain_intersecting(&mut self.events, new_span);
         // Find the new spans and query events for them.
@@ -69,7 +69,7 @@ impl<T: core::fmt::Debug> EventCache<T> {
     }
 }
 
-impl<T> Default for EventCache<T> {
+impl<T, C: Context> Default for EventCache<T, C> {
     fn default() -> Self {
         let span = Span::instant(0.into());
         let events = Default::default();
@@ -85,9 +85,9 @@ mod tests {
     #[test]
     fn test_update_no_overlap() {
         let pattern = &[
-            Event::new((), span!(0 / 1, 1 / 1), None),
-            Event::new((), span!(1 / 1, 2 / 1), None),
-            Event::new((), span!(2 / 1, 3 / 1), None),
+            Event::new((), span!(0 / 1, 1 / 1), None, ()),
+            Event::new((), span!(1 / 1, 2 / 1), None, ()),
+            Event::new((), span!(2 / 1, 3 / 1), None, ()),
         ][..];
         let span = span!(0 / 1, 3 / 1);
         let events = pattern.query(span).collect();
@@ -101,11 +101,11 @@ mod tests {
     #[test]
     fn test_update_partial_overlap() {
         let pattern = &[
-            Event::new((), span!(0 / 1, 1 / 1), None),
-            Event::new((), span!(1 / 1, 2 / 1), None),
-            Event::new((), span!(2 / 1, 3 / 1), None),
-            Event::new((), span!(3 / 1, 4 / 1), None),
-            Event::new((), span!(4 / 1, 5 / 1), None),
+            Event::new((), span!(0 / 1, 1 / 1), None, ()),
+            Event::new((), span!(1 / 1, 2 / 1), None, ()),
+            Event::new((), span!(2 / 1, 3 / 1), None, ()),
+            Event::new((), span!(3 / 1, 4 / 1), None, ()),
+            Event::new((), span!(4 / 1, 5 / 1), None, ()),
         ][..];
         let span = span!(0 / 1, 3 / 1);
         let events = pattern.query(span).collect();
@@ -118,9 +118,9 @@ mod tests {
         assert_eq!(
             &cache.events[..],
             &[
-                Event::new(&(), span!(2 / 1, 3 / 1), None),
-                Event::new(&(), span!(3 / 1, 4 / 1), None),
-                Event::new(&(), span!(4 / 1, 5 / 1), None),
+                Event::new(&(), span!(2 / 1, 3 / 1), None, ()),
+                Event::new(&(), span!(3 / 1, 4 / 1), None, ()),
+                Event::new(&(), span!(4 / 1, 5 / 1), None, ()),
             ][..],
         );
     }
@@ -128,9 +128,9 @@ mod tests {
     #[test]
     fn test_update_full_overlap() {
         let pattern = &[
-            Event::new((), span!(0 / 1, 1 / 1), None),
-            Event::new((), span!(1 / 1, 2 / 1), None),
-            Event::new((), span!(2 / 1, 3 / 1), None),
+            Event::new((), span!(0 / 1, 1 / 1), None, ()),
+            Event::new((), span!(1 / 1, 2 / 1), None, ()),
+            Event::new((), span!(2 / 1, 3 / 1), None, ()),
         ][..];
         let span = span!(0 / 1, 3 / 1);
         let events = pattern.query(span).collect();
@@ -140,16 +140,16 @@ mod tests {
         assert_eq!(cache.span, new_span);
         assert_eq!(
             &cache.events[..],
-            &[Event::new(&(), span!(1 / 1, 2 / 1), None),],
+            &[Event::new(&(), span!(1 / 1, 2 / 1), None, ()),],
         );
     }
 
     #[test]
     fn test_update_same_span() {
         let pattern = &[
-            Event::new((), Span::instant(0.into()), None),
-            Event::new((), Span::instant(1.into()), None),
-            Event::new((), Span::instant(2.into()), None),
+            Event::new((), Span::instant(0.into()), None, ()),
+            Event::new((), Span::instant(1.into()), None, ()),
+            Event::new((), Span::instant(2.into()), None, ()),
         ][..];
         let span = span!(0 / 1, 3 / 1);
         let events = pattern.query(span).collect();

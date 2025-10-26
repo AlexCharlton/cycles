@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
-    fmt,
+    fmt::{self, Debug},
     ops::{Add, Mul, Sub},
 };
 
@@ -36,12 +36,14 @@ pub mod prelude {
 /// A composable abstraction for 1-dimensional patterns.
 ///
 /// A [`Pattern`] is any type that may be [queried][`Pattern::query`] with a
-/// [`Span`] to produce a sequence of [`Event<Self::Value>`]s.
+/// [`Span`] to produce a sequence of [`Event<Self::Value, Self::Context>`]s.
 pub trait Pattern {
     /// The type of the values emitted in the pattern's events.
     type Value;
+    /// The type of the context associated with the pattern's events.
+    type Context: Context;
     /// An iterator yielding the events occurring within a query's span.
-    type Events: Iterator<Item = Event<Self::Value>>;
+    type Events: Iterator<Item = Event<Self::Value, Self::Context>>;
 
     /// Query the pattern for events within the given span.
     ///
@@ -50,12 +52,12 @@ pub trait Pattern {
     /// ```rust
     /// use cycles::{atom, saw, span, Pattern, Rational};
     ///
-    /// let pattern = atom("hello");
+    /// let pattern = atom("hello", ());
     /// let mut events = pattern.query(span!(0/1, 1/1));
     /// assert_eq!(events.next().unwrap().value, "hello");
     /// assert_eq!(events.next(), None);
     ///
-    /// let pattern = saw();
+    /// let pattern = saw::<()>();
     /// assert_eq!(pattern.query(span!(0/1)).next().unwrap().value, (0, 1).into());
     /// assert_eq!(pattern.query(span!(1/2)).next().unwrap().value, (1, 2).into());
     /// ```
@@ -71,7 +73,7 @@ pub trait Pattern {
     ///
     /// This is useful for storing multiple patterns within a single
     /// collection, or passing patterns between threads, etc.
-    fn into_dyn(self) -> DynPattern<Self::Value>
+    fn into_dyn(self) -> DynPattern<Self::Value, Self::Context>
     where
         Self: 'static + Sized,
     {
@@ -79,7 +81,7 @@ pub trait Pattern {
     }
 
     /// Filter the pattern's events by applying the predicate to their values.
-    fn filter<F>(self, predicate: F) -> impl Pattern<Value = Self::Value>
+    fn filter<F>(self, predicate: F) -> impl Pattern<Value = Self::Value, Context = Self::Context>
     where
         Self: Sized,
         F: Fn(&Self::Value) -> bool,
@@ -92,10 +94,13 @@ pub trait Pattern {
     }
 
     /// Filter the pattern's events by the given function.
-    fn filter_events<F>(self, predicate: F) -> impl Pattern<Value = Self::Value>
+    fn filter_events<F>(
+        self,
+        predicate: F,
+    ) -> impl Pattern<Value = Self::Value, Context = Self::Context>
     where
         Self: Sized,
-        F: Fn(&Event<Self::Value>) -> bool,
+        F: Fn(&Event<Self::Value, Self::Context>) -> bool,
     {
         let predicate = Arc::new(predicate);
         move |span| {
@@ -140,7 +145,7 @@ pub trait Pattern {
     /// Map the length of the `active` and `whole` spans of all events produced by `self`.
     ///
     /// The `end` of the resulting `whole` span is adjusted to achieve the returned `len`.
-    fn map_event_lens<F>(self, map: F) -> impl Pattern<Value = Self::Value>
+    fn map_event_lens<F>(self, map: F) -> impl Pattern<Value = Self::Value, Context = Self::Context>
     where
         Self: Sized,
         F: Fn(Rational) -> Rational,
@@ -152,7 +157,7 @@ pub trait Pattern {
     fn map_events<F, T>(self, map: F) -> MapEvents<Self, F>
     where
         Self: Sized,
-        F: Fn(Event<Self::Value>) -> Event<T>,
+        F: Fn(Event<Self::Value, Self::Context>) -> Event<T, Self::Context>,
     {
         let pattern = self;
         let map = Arc::new(map);
@@ -160,11 +165,11 @@ pub trait Pattern {
     }
 
     /// Map the events iterator produced by the pattern queries with the given function.
-    fn map_events_iter<E, F, T>(self, map: F) -> MapEventsIter<Self, F>
+    fn map_events_iter<E, F, T, C: Context>(self, map: F) -> MapEventsIter<Self, F>
     where
         Self: Sized,
         F: Fn(Self::Events) -> E,
-        E: Iterator<Item = Event<T>>,
+        E: Iterator<Item = Event<T, C>>,
     {
         let pattern = self;
         MapEventsIter { pattern, map }
@@ -180,7 +185,7 @@ pub trait Pattern {
     }
 
     /// Shift the pattern by the given amount.
-    fn shift(self, amount: Rational) -> impl Pattern<Value = Self::Value>
+    fn shift(self, amount: Rational) -> impl Pattern<Value = Self::Value, Context = Self::Context>
     where
         Self: 'static + Sized,
     {
@@ -195,11 +200,15 @@ pub trait Pattern {
     /// The resulting structure is determined by the given function `structure`
     /// which provides the `whole` spans of the intersecting events produced by
     /// `self` and `apply` respectively.
-    fn apply<P, F, G, B>(self, apply: P, structure: G) -> impl Pattern<Value = B>
+    fn apply<P, F, G, B>(
+        self,
+        apply: P,
+        structure: G,
+    ) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
         F: Fn(Self::Value) -> B,
         G: 'static + Fn(Span, Span) -> Span,
     {
@@ -221,7 +230,7 @@ pub trait Pattern {
                             .and_then(|lw| ef.span.whole.map(|rw| (*structure)(lw, rw)));
 
                         let value = (ef.value)(ev.value);
-                        Event::new(value, active, whole)
+                        Event::new(value, active, whole, ev.context.merge(&ef.context))
                     })
                 })
             })
@@ -233,11 +242,11 @@ pub trait Pattern {
     /// Yields an event at each intersection between the active spans of `self` and `apply`.
     ///
     /// The resulting structure is the intersection of `self` and `apply`.
-    fn app<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn app<P, F, B>(self, apply: P) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
         F: Fn(Self::Value) -> B,
     {
         self.apply(apply, |l, r| {
@@ -249,12 +258,12 @@ pub trait Pattern {
     /// Apply the given pattern of functions to `self`. The resulting events are the intersection of the active spans of `self` and `apply`.
     ///
     /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
-    fn apply_events<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn apply_events<P, F, B>(self, apply: P) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
-        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
+        F: Fn(Event<Self::Value, Self::Context>) -> Option<Event<B, Self::Context>>,
     {
         let apply = Arc::new(apply);
 
@@ -275,7 +284,12 @@ pub trait Pattern {
                                 })
                             });
 
-                            (r.value)(Event::new(l.value.clone(), active, whole))
+                            (r.value)(Event::new(
+                                l.value.clone(),
+                                active,
+                                whole,
+                                l.context.merge(&r.context),
+                            ))
                         })
                 })
             })
@@ -285,11 +299,11 @@ pub trait Pattern {
     /// Apply the given pattern of functions to `self`.
     ///
     /// Similar to `apply`, but the structure of the resulting event is carried from the left (i.e. `self`).
-    fn appl<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn appl<P, F, B>(self, apply: P) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
         F: Fn(Self::Value) -> B,
     {
         let apply = Arc::new(apply);
@@ -301,7 +315,7 @@ pub trait Pattern {
                     let l = l.clone();
                     l.span.active.intersect(r.span.active).map(|active| {
                         let value = (r.value)(l.value);
-                        Event::new(value, active, l.span.whole)
+                        Event::new(value, active, l.span.whole, l.context.merge(&r.context))
                     })
                 })
             })
@@ -311,12 +325,15 @@ pub trait Pattern {
     /// Apply the given pattern of functions to `self` from the left (i.e. `self`).
     ///
     /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
-    fn apply_events_left<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn apply_events_left<P, F, B>(
+        self,
+        apply: P,
+    ) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
-        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
+        F: Fn(Event<Self::Value, Self::Context>) -> Option<Event<B, Self::Context>>,
     {
         let apply = Arc::new(apply);
 
@@ -330,7 +347,12 @@ pub trait Pattern {
                         .intersect(r.span.active)
                         .into_iter()
                         .flat_map(move |active| {
-                            (r.value)(Event::new(l.value.clone(), active, l.span.whole))
+                            (r.value)(Event::new(
+                                l.value.clone(),
+                                active,
+                                l.span.whole,
+                                l.context.merge(&r.context),
+                            ))
                         })
                 })
             })
@@ -340,11 +362,11 @@ pub trait Pattern {
     /// Apply the given pattern of functions to `self`.
     ///
     /// Similar to `apply`, but the structure of the resulting event is carried from the right (i.e. `apply`).
-    fn appr<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn appr<P, F, B>(self, apply: P) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
         F: Fn(Self::Value) -> B,
     {
         let apply = Arc::new(apply);
@@ -357,7 +379,7 @@ pub trait Pattern {
                 this.query(r.span.whole_or_active()).flat_map(move |l| {
                     l.span.active.intersect(r.span.active).map(|active| {
                         let value = (r.value)(l.value);
-                        Event::new(value, active, r.span.whole)
+                        Event::new(value, active, r.span.whole, l.context.merge(&r.context))
                     })
                 })
             })
@@ -367,12 +389,15 @@ pub trait Pattern {
     /// Apply the given pattern of functions to `self` from the right (i.e. `apply`).
     ///
     /// The functions take an event from `self` and return an `Option<Event<_>>` of any type.
-    fn apply_events_right<P, F, B>(self, apply: P) -> impl Pattern<Value = B>
+    fn apply_events_right<P, F, B>(
+        self,
+        apply: P,
+    ) -> impl Pattern<Value = B, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern<Value = F>,
-        F: Fn(Event<Self::Value>) -> Option<Event<B>>,
+        P: 'static + Pattern<Value = F, Context = Self::Context>,
+        F: Fn(Event<Self::Value, Self::Context>) -> Option<Event<B, Self::Context>>,
     {
         let apply = Arc::new(apply);
         let this = Arc::new(self);
@@ -389,7 +414,12 @@ pub trait Pattern {
                         .intersect(r.span.active)
                         .into_iter()
                         .flat_map(move |active| {
-                            (r.value)(Event::new(l.value.clone(), active, r.span.whole))
+                            (r.value)(Event::new(
+                                l.value.clone(),
+                                active,
+                                r.span.whole,
+                                l.context.merge(&r.context),
+                            ))
                         })
                 })
             })
@@ -398,11 +428,11 @@ pub trait Pattern {
 
     /// Merge the given pattern by calling the given function for each value at
     /// each active span intersection.
-    fn merge<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    fn merge<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern,
+        P: 'static + Pattern<Context = Self::Context>,
         P::Value: Clone,
         F: 'static + Fn(Self::Value, P::Value) -> T,
     {
@@ -416,11 +446,15 @@ pub trait Pattern {
 
     /// Merge the given pattern by calling the given function for each value at
     /// each active span intersection. The structure of the resulting event is carried from the left (i.e. `self`).
-    fn merge_left<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    fn merge_left<P, F, T>(
+        self,
+        other: P,
+        merge: F,
+    ) -> impl Pattern<Value = T, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern,
+        P: 'static + Pattern<Context = Self::Context>,
         P::Value: Clone,
         F: 'static + Fn(Self::Value, P::Value) -> T,
     {
@@ -434,11 +468,15 @@ pub trait Pattern {
 
     /// Merge the given pattern by calling the given function for each value at
     /// each active span intersection. The structure of the resulting event is carried from the right (i.e. `other`).
-    fn merge_right<P, F, T>(self, other: P, merge: F) -> impl Pattern<Value = T>
+    fn merge_right<P, F, T>(
+        self,
+        other: P,
+        merge: F,
+    ) -> impl Pattern<Value = T, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone,
-        P: 'static + Pattern,
+        P: 'static + Pattern<Context = Self::Context>,
         P::Value: Clone,
         F: 'static + Fn(Self::Value, P::Value) -> T,
     {
@@ -455,11 +493,11 @@ pub trait Pattern {
     ///
     /// Useful for applying one control pattern to another and producing the
     /// union between values.
-    fn merge_extend<P>(self, other: P) -> impl Pattern<Value = Self::Value>
+    fn merge_extend<P>(self, other: P) -> impl Pattern<Value = Self::Value, Context = Self::Context>
     where
         Self: 'static + Sized,
         Self::Value: Clone + Extend<<P::Value as IntoIterator>::Item>,
-        P: 'static + Pattern,
+        P: 'static + Pattern<Context = Self::Context>,
         P::Value: Clone + IntoIterator,
     {
         self.merge(other, |mut s, o| {
@@ -491,7 +529,7 @@ pub trait Pattern {
     /// Return a wrapper providing a `fmt::Debug` implementation for the pattern.
     ///
     /// Formats events resulting from a query to the given span.
-    fn debug_span(&self, span: Span) -> PatternDebug<'_, Self::Value, Self::Events>
+    fn debug_span(&self, span: Span) -> PatternDebug<'_, Self::Value, Self::Context, Self::Events>
     where
         Self: Sized,
     {
@@ -502,7 +540,7 @@ pub trait Pattern {
     /// Return a wrapper providing a `fmt::Debug` implementation for the pattern.
     ///
     /// Formats events resulting from a query for a single cycle.
-    fn debug(&self) -> PatternDebug<'_, Self::Value, Self::Events>
+    fn debug(&self) -> PatternDebug<'_, Self::Value, Self::Context, Self::Events>
     where
         Self: Sized,
     {
@@ -554,31 +592,97 @@ pub type Scalar = i64;
 ///
 /// Useful for storing or sending patterns, at the cost of boxing queried
 /// events and allocating the inner [`Pattern`] behind an ARC.
-pub struct DynPattern<T>(Arc<dyn Pattern<Value = T, Events = BoxEvents<T>>>);
+pub struct DynPattern<T, C: Context>(
+    Arc<dyn Pattern<Value = T, Context = C, Events = BoxEvents<T, C>>>,
+);
 
 /// A dynamic representation of a pattern's associated events iterator.
-pub struct BoxEvents<T>(Box<dyn Iterator<Item = Event<T>>>);
+pub struct BoxEvents<T, C: Context>(Box<dyn Iterator<Item = Event<T, C>>>);
 
 /// A type providing a [`core::fmt::Debug`] implementation for types implementing [`Pattern`].
-pub struct PatternDebug<'p, V, E> {
-    pattern: &'p dyn Pattern<Value = V, Events = E>,
+pub struct PatternDebug<'p, V, C: Context, E> {
+    pattern: &'p dyn Pattern<Value = V, Context = C, Events = E>,
     span: Span,
 }
 
+pub trait Context: Clone + Debug {
+    fn merge(&self, other: &Self) -> Self;
+    fn empty() -> Self;
+}
+
+impl Context for () {
+    fn merge(&self, _other: &Self) -> Self {
+        ()
+    }
+
+    fn empty() -> Self {
+        ()
+    }
+}
+
 /// An event yielded by a pattern query, see [`Pattern::query`].
-#[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "T: serde::Serialize")))]
 #[cfg_attr(
     feature = "serde",
-    serde(bound(deserialize = "T: serde::Deserialize<'de>"))
+    serde(bound(serialize = "T: serde::Serialize, C: serde::Serialize"))
 )]
-pub struct Event<T> {
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "T: serde::Deserialize<'de>, C: serde::Deserialize<'de>"))
+)]
+pub struct Event<T, C: Context> {
     /// The span of the event (both "active" and "whole" parts).
     pub span: EventSpan,
     /// The value associated with the event.
     pub value: T,
+    /// The context associated with the event.
+    pub context: C,
 }
+
+// Cross-context PartialEq implementation that handles both same and different context types
+impl<T, C1: Context, C2: Context> PartialEq<Event<T, C2>> for Event<T, C1>
+where
+    T: PartialEq,
+{
+    fn eq(&self, other: &Event<T, C2>) -> bool {
+        self.span == other.span && self.value == other.value
+        // Note: context field is intentionally ignored for equality comparison
+    }
+}
+
+impl<T, C: Context> Eq for Event<T, C> where T: Eq {}
+
+impl<T, C: Context> Clone for Event<T, C>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            span: self.span,
+            value: self.value.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl<T, C: Context> Debug for Event<T, C>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut d = f.debug_struct("Event");
+        if let Some(whole) = self.span.whole {
+            d.field("whole", &whole);
+        }
+        d.field("active", &self.span.active)
+            .field("value", &self.value)
+            .field("context", &self.context)
+            .finish()
+    }
+}
+
+pub type NoContextEvent<T> = Event<T, ()>;
 
 /// The span associated with a single event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -595,7 +699,7 @@ pub struct EventSpan {
 
 /// See the [`signal`] pattern constructor.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct Signal<S>(S);
+pub struct Signal<S, C: Context>(S, core::marker::PhantomData<C>);
 
 /// See [`Pattern::map_events`].
 #[derive(Debug)]
@@ -669,23 +773,32 @@ pub struct EventsRate<I> {
 
 // ----------------------------------------------------------------------------
 
-impl<T> Event<T> {
-    pub fn new(value: T, active: Span, whole: Option<Span>) -> Self {
+impl<T, C: Context> Event<T, C> {
+    pub fn new(value: T, active: Span, whole: Option<Span>, context: C) -> Self {
         let span = EventSpan::new(active, whole);
-        Self { span, value }
+        Self {
+            span,
+            value,
+            context,
+        }
     }
 
-    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> Event<U> {
-        let Event { span, value } = self;
+    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> Event<U, C> {
+        let Event {
+            span,
+            value,
+            context,
+        } = self;
         let value = map(value);
-        Event::new(value, span.active, span.whole)
+        Event::new(value, span.active, span.whole, context)
     }
 
     pub fn map_spans(self, map: impl Fn(Span) -> Span) -> Self {
         let active = map(self.span.active);
         let whole = self.span.whole.map(&map);
         let value = self.value;
-        Self::new(value, active, whole)
+        let context = self.context;
+        Self::new(value, active, whole, context)
     }
 
     pub fn map_points(self, map: impl Fn(Rational) -> Rational) -> Self {
@@ -696,14 +809,24 @@ impl<T> Event<T> {
         self.map_spans(|s| s.map_len(&map))
     }
 
-    pub fn by_ref(&self) -> Event<&T> {
-        Event::new(&self.value, self.span.active, self.span.whole)
+    pub fn by_ref(&self) -> Event<&T, C> {
+        Event::new(
+            &self.value,
+            self.span.active,
+            self.span.whole,
+            self.context.clone(),
+        )
     }
 }
 
-impl<'a, T: Clone> Event<&'a T> {
-    pub fn cloned(self) -> Event<T> {
-        Event::new(self.value.clone(), self.span.active, self.span.whole)
+impl<'a, T: Clone, C: Context> Event<&'a T, C> {
+    pub fn cloned(self) -> Event<T, C> {
+        Event::new(
+            self.value.clone(),
+            self.span.active,
+            self.span.whole,
+            self.context.clone(),
+        )
     }
 }
 
@@ -736,57 +859,62 @@ impl EventSpan {
     }
 }
 
-impl<T> BoxEvents<T> {
+impl<T, C: Context> BoxEvents<T, C> {
     fn new<E>(es: E) -> Self
     where
-        E: 'static + Iterator<Item = Event<T>>,
+        E: 'static + Iterator<Item = Event<T, C>>,
     {
         Self(Box::new(es) as Box<_>)
     }
 }
 
-impl<T> DynPattern<T> {
+impl<T, C: Context> DynPattern<T, C> {
     fn new<P>(pattern: P) -> Self
     where
-        P: 'static + Pattern<Value = T>,
+        P: 'static + Pattern<Value = T, Context = C>,
         T: 'static,
+        C: 'static,
     {
         let arc = Arc::new(pattern.map_events_iter(BoxEvents::new))
-            as Arc<dyn Pattern<Value = T, Events = BoxEvents<T>>>;
+            as Arc<dyn Pattern<Value = T, Context = C, Events = BoxEvents<T, C>>>;
         DynPattern(arc)
     }
 }
 
 // ----------------------------------------------------------------------------
 
-impl<F, I, T> Pattern for F
+impl<F, I, T, C: Context> Pattern for F
 where
     F: Fn(Span) -> I,
-    I: Iterator<Item = Event<T>>,
+    I: Iterator<Item = Event<T, C>>,
 {
     type Value = T;
+    type Context = C;
     type Events = I;
     fn query(&self, span: Span) -> Self::Events {
         (*self)(span)
     }
 }
 
-impl<T> Pattern for DynPattern<T> {
+impl<T, C: Context> Pattern for DynPattern<T, C> {
     type Value = T;
-    type Events = BoxEvents<T>;
+    type Context = C;
+    type Events = BoxEvents<T, C>;
     fn query(&self, span: Span) -> Self::Events {
         self.0.query(span)
     }
 }
 
-impl<S: Sample> Pattern for Signal<S> {
+impl<S: Sample, C: Context> Pattern for Signal<S, C> {
     type Value = S::Value;
-    type Events = core::iter::Once<Event<Self::Value>>;
+    type Context = C;
+    type Events = core::iter::Once<Event<Self::Value, Self::Context>>;
     fn query(&self, active @ Span { start, end }: Span) -> Self::Events {
-        let Signal(s) = self;
+        let Signal(s, _) = self;
         let value = s.sample(start + ((end - start) / 2));
         let whole = None;
-        let event = Event::new(value, active, whole);
+        let context = C::empty();
+        let event = Event::new(value, active, whole, context);
         core::iter::once(event)
     }
 }
@@ -797,6 +925,7 @@ where
     F: Fn(P::Value) -> T,
 {
     type Value = T;
+    type Context = P::Context;
     type Events = EventsMapValues<P::Events, F>;
     fn query(&self, span: Span) -> Self::Events {
         let Self { pattern, map } = self;
@@ -812,6 +941,7 @@ where
     F: Fn(Rational) -> Rational,
 {
     type Value = P::Value;
+    type Context = P::Context;
     type Events = P::Events;
     fn query(&self, span: Span) -> Self::Events {
         let span = span.map(&self.map);
@@ -825,6 +955,7 @@ where
     F: Fn(Rational) -> Rational,
 {
     type Value = P::Value;
+    type Context = P::Context;
     type Events = EventsMapPoints<P::Events, F>;
     fn query(&self, span: Span) -> Self::Events {
         let Self { pattern, map } = self;
@@ -837,9 +968,10 @@ where
 impl<P, F, T> Pattern for MapEvents<P, F>
 where
     P: Pattern,
-    F: Fn(Event<P::Value>) -> Event<T>,
+    F: Fn(Event<P::Value, P::Context>) -> Event<T, P::Context>,
 {
     type Value = T;
+    type Context = P::Context;
     type Events = EventsMap<P::Events, F>;
     fn query(&self, span: Span) -> Self::Events {
         let events = self.pattern.query(span);
@@ -848,13 +980,14 @@ where
     }
 }
 
-impl<P, F, E, T> Pattern for MapEventsIter<P, F>
+impl<P, F, E, T, C: Context> Pattern for MapEventsIter<P, F>
 where
     P: Pattern,
     F: Fn(P::Events) -> E,
-    E: Iterator<Item = Event<T>>,
+    E: Iterator<Item = Event<T, C>>,
 {
     type Value = T;
+    type Context = C;
     type Events = E;
     fn query(&self, span: Span) -> Self::Events {
         let Self { pattern, map } = self;
@@ -868,6 +1001,7 @@ where
     P: Pattern,
 {
     type Value = P::Value;
+    type Context = P::Context;
     type Events = EventsRate<P::Events>;
     fn query(&self, span: Span) -> Self::Events {
         let Self { ref pattern, rate } = *self;
@@ -877,44 +1011,44 @@ where
     }
 }
 
-impl<I, F, T, U> Iterator for EventsMap<I, F>
+impl<I, F, T, U, C: Context> Iterator for EventsMap<I, F>
 where
-    I: Iterator<Item = Event<T>>,
-    F: Fn(Event<T>) -> Event<U>,
+    I: Iterator<Item = Event<T, C>>,
+    F: Fn(Event<T, C>) -> Event<U, C>,
 {
-    type Item = Event<U>;
+    type Item = Event<U, C>;
     fn next(&mut self) -> Option<Self::Item> {
         self.events.next().map(&*self.map)
     }
 }
 
-impl<I, F, T, U> Iterator for EventsMapValues<I, F>
+impl<I, F, T, U, C: Context> Iterator for EventsMapValues<I, F>
 where
-    I: Iterator<Item = Event<T>>,
+    I: Iterator<Item = Event<T, C>>,
     F: Fn(T) -> U,
 {
-    type Item = Event<U>;
+    type Item = Event<U, C>;
     fn next(&mut self) -> Option<Self::Item> {
         self.events.next().map(|ev| ev.map(&*self.map))
     }
 }
 
-impl<I, F, T> Iterator for EventsMapPoints<I, F>
+impl<I, F, T, C: Context> Iterator for EventsMapPoints<I, F>
 where
-    I: Iterator<Item = Event<T>>,
+    I: Iterator<Item = Event<T, C>>,
     F: Fn(Rational) -> Rational,
 {
-    type Item = Event<T>;
+    type Item = Event<T, C>;
     fn next(&mut self) -> Option<Self::Item> {
         self.events.next().map(|ev| ev.map_points(&*self.map))
     }
 }
 
-impl<I, T> Iterator for EventsRate<I>
+impl<I, T, C: Context> Iterator for EventsRate<I>
 where
-    I: Iterator<Item = Event<T>>,
+    I: Iterator<Item = Event<T, C>>,
 {
-    type Item = Event<T>;
+    type Item = Event<T, C>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.rate == Rational::from(0) {
             return None;
@@ -925,8 +1059,8 @@ where
     }
 }
 
-impl<T> Iterator for BoxEvents<T> {
-    type Item = Event<T>;
+impl<T, C: Context> Iterator for BoxEvents<T, C> {
+    type Item = Event<T, C>;
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
@@ -960,7 +1094,7 @@ impl PartialOrd for EventSpan {
     }
 }
 
-impl<T> Clone for DynPattern<T> {
+impl<T, C: Context> Clone for DynPattern<T, C> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
@@ -972,24 +1106,9 @@ impl ToF64Lossy for Rational {
     }
 }
 
-impl<T> fmt::Debug for Event<T>
+impl<'p, V, C: Context, E> fmt::Debug for PatternDebug<'p, V, C, E>
 where
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut d = f.debug_struct("Event");
-        if let Some(whole) = self.span.whole {
-            d.field("whole", &whole);
-        }
-        d.field("active", &self.span.active)
-            .field("value", &self.value)
-            .finish()
-    }
-}
-
-impl<'p, V, E> fmt::Debug for PatternDebug<'p, V, E>
-where
-    E: Iterator<Item = Event<V>>,
+    E: Iterator<Item = Event<V, C>>,
     V: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -998,7 +1117,7 @@ where
     }
 }
 
-impl<'p, V> fmt::Debug for DynPattern<V>
+impl<'p, V, C: Context> fmt::Debug for DynPattern<V, C>
 where
     V: fmt::Debug,
 {
@@ -1010,56 +1129,62 @@ where
 // ----------------------------------------------------------------------------
 
 /// A pattern that, when queried, always produces a single event sampled from the given function.
-pub fn signal<S: Sample>(sample: S) -> impl Pattern<Value = S::Value> {
-    Signal(sample)
+pub fn signal<S: Sample, C: Context>(sample: S) -> impl Pattern<Value = S::Value, Context = C> {
+    Signal(sample, core::marker::PhantomData)
 }
 
 /// When queried, always returns a single event with a clone of the given value.
 // TODO: Better name = clone?
-pub fn steady<T: Clone>(t: T) -> impl Pattern<Value = T> {
+pub fn steady<T: Clone, C: Context>(t: T) -> impl Pattern<Value = T, Context = C> {
     signal(move |_| t.clone())
 }
 
 /// When queried, always produces an empty event iterator.
 // TODO: Better name = empty?
-pub fn silence<T>() -> impl Pattern<Value = T> {
+pub fn silence<T, C: Context>() -> impl Pattern<Value = T, Context = C> {
     |_| core::iter::empty()
 }
 
 /// Repeats a given discrete value once per cycle.
 // TODO: Better name = cycle?
-pub fn atom<T: Clone>(t: T) -> impl Pattern<Value = T> {
+pub fn atom<T: Clone, C: Context>(t: T, context: C) -> impl Pattern<Value = T, Context = C> {
     move |span: Span| {
         let t = t.clone();
+        let context = context.clone();
         span.cycles().map(move |active| {
             let start = active.start.floor();
             let end = start + 1;
             let whole = Some(Span { start, end });
             let value = t.clone();
-            Event::new(value, active, whole)
+            Event::new(value, active, whole, context.clone())
         })
     }
 }
 
 /// A signal pattern that produces a saw wave in the range 0..=1.
-pub fn saw() -> impl Pattern<Value = Rational> {
+pub fn saw<C: Context>() -> impl Pattern<Value = Rational, Context = C> {
     signal(|r: Rational| r - r.floor())
 }
 
 /// A signal pattern that produces a saw wave in the range -1..=1.
-pub fn saw2() -> impl Pattern<Value = Rational> {
-    saw().polar()
+pub fn saw2<C: Context>() -> impl Pattern<Value = Rational, Context = C> {
+    saw().map(|x| x.polar())
 }
 
 /// A pattern producing an index per cycle.
-pub fn indices() -> impl Pattern<Value = Scalar> {
-    atom(()).map_events(|ev| ev.map(|_| ev.span.active.start.to_integer()))
+pub fn indices<C: Context>() -> impl Pattern<Value = Scalar, Context = C> {
+    atom((), C::empty()).map_events(|ev| {
+        let start = ev.span.active.start.to_integer();
+        ev.map(|_| start)
+    })
 }
 
 /// Concatenate the given sequence of patterns into a single pattern whose
 /// total unique span covers a number of cycles equal to the number of patterns
 /// in the sequence.
-pub fn slowcat<I>(patterns: I) -> impl Pattern<Value = <I::Item as Pattern>::Value>
+pub fn slowcat<I>(
+    patterns: I,
+) -> impl Pattern<Value = <I::Item as Pattern>::Value, Context = <I::Item as Pattern>::Context>
 where
     I: IntoIterator,
     I::Item: Pattern,
@@ -1087,7 +1212,9 @@ where
 
 /// Concatenate the given sequence of patterns into a single pattern so that
 /// all patterns fit to a single cycle.
-pub fn fastcat<I>(patterns: I) -> impl Pattern<Value = <I::Item as Pattern>::Value>
+pub fn fastcat<I>(
+    patterns: I,
+) -> impl Pattern<Value = <I::Item as Pattern>::Value, Context = <I::Item as Pattern>::Context>
 where
     I: IntoIterator,
     I::Item: Pattern,
@@ -1100,7 +1227,7 @@ where
 }
 
 /// Like [fastcat] but allows the user to provide proportionate sizes for each pattern.
-pub fn timecat<I, P>(patterns: I) -> impl Pattern<Value = P::Value>
+pub fn timecat<I, P>(patterns: I) -> impl Pattern<Value = P::Value, Context = P::Context>
 where
     I: IntoIterator<Item = (Rational, P)>,
     I::IntoIter: ExactSizeIterator,
@@ -1161,7 +1288,9 @@ where
 /// Combine the patterns into a single "stacked" pattern, where each query
 /// is equivalent to querying each of the inner patterns and concatenating their
 /// produced events.
-pub fn stack<I>(patterns: I) -> impl Pattern<Value = <I::Item as Pattern>::Value>
+pub fn stack<I>(
+    patterns: I,
+) -> impl Pattern<Value = <I::Item as Pattern>::Value, Context = <I::Item as Pattern>::Context>
 where
     I: IntoIterator,
     I::Item: Pattern,
@@ -1180,13 +1309,19 @@ where
 /// 3. For each inner event, set the whole and active to be the intersection of
 /// the outer whole and part respectively.
 /// 4. Concatenate all the events together (discarding whole/parts that don't intersect).
-pub fn join<P: Pattern>(pp: impl Pattern<Value = P>) -> impl Pattern<Value = P::Value> {
+pub fn join<P: Pattern>(
+    pp: impl Pattern<Value = P, Context = P::Context>,
+) -> impl Pattern<Value = P::Value, Context = P::Context> {
     move |span: Span| {
-        pp.query(span).flat_map(move |o_ev: Event<P>| {
+        pp.query(span).flat_map(move |o_ev: Event<P, P::Context>| {
             o_ev.value.query(o_ev.span.active).filter_map(move |i_ev| {
                 o_ev.span.intersect(i_ev.span).map(|span| {
                     let value = i_ev.value;
-                    Event { span, value }
+                    Event {
+                        span,
+                        value,
+                        context: i_ev.context,
+                    }
                 })
             })
         })
@@ -1194,45 +1329,58 @@ pub fn join<P: Pattern>(pp: impl Pattern<Value = P>) -> impl Pattern<Value = P::
 }
 
 /// Similar to `join`, but the structure only comes from the inner pattern.
-pub fn inner_join<P: Pattern>(pp: impl Pattern<Value = P>) -> impl Pattern<Value = P::Value> {
+pub fn inner_join<P: Pattern>(
+    pp: impl Pattern<Value = P, Context = P::Context>,
+) -> impl Pattern<Value = P::Value, Context = P::Context> {
     move |q_span: Span| {
-        pp.query(q_span).flat_map(move |o_ev: Event<P>| {
-            o_ev.value.query(o_ev.span.active).filter_map(move |i_ev| {
-                let whole = i_ev.span.whole;
-                q_span.intersect(i_ev.span.active).map(|active| {
-                    let span = EventSpan { whole, active };
-                    let value = i_ev.value;
-                    Event { span, value }
+        pp.query(q_span)
+            .flat_map(move |o_ev: Event<P, P::Context>| {
+                o_ev.value.query(o_ev.span.active).filter_map(move |i_ev| {
+                    let whole = i_ev.span.whole;
+                    q_span.intersect(i_ev.span.active).map(|active| {
+                        let span = EventSpan { whole, active };
+                        let value = i_ev.value;
+                        Event {
+                            span,
+                            value,
+                            context: i_ev.context,
+                        }
+                    })
                 })
             })
-        })
     }
 }
 
 /// Similar to `join`, but the structure only comes from the outer pattern.
-pub fn outer_join<P: Pattern>(pp: impl Pattern<Value = P>) -> impl Pattern<Value = P::Value> {
+pub fn outer_join<P: Pattern>(
+    pp: impl Pattern<Value = P, Context = P::Context>,
+) -> impl Pattern<Value = P::Value, Context = P::Context> {
     move |q_span: Span| {
-        pp.query(q_span).flat_map(move |o_ev: Event<P>| {
-            let i_q_span = Span::instant(o_ev.span.whole_or_active().start);
-            o_ev.value.query(i_q_span).filter_map(move |i_ev| {
-                let whole = o_ev.span.whole;
-                q_span.intersect(o_ev.span.active).map(|active| {
-                    let span = EventSpan { whole, active };
-                    let value = i_ev.value;
-                    Event { span, value }
+        pp.query(q_span)
+            .flat_map(move |o_ev: Event<P, P::Context>| {
+                let i_q_span = Span::instant(o_ev.span.whole_or_active().start);
+                o_ev.value.query(i_q_span).filter_map(move |i_ev| {
+                    let whole = o_ev.span.whole;
+                    q_span.intersect(o_ev.span.active).map(|active| {
+                        let span = EventSpan { whole, active };
+                        let value = i_ev.value;
+                        Event {
+                            span,
+                            value,
+                            context: i_ev.context,
+                        }
+                    })
                 })
             })
-        })
     }
 }
 
 /// Fit the `src` span of the given pattern to the `dst` span by first
 /// adjusting the rate and then shifting the pattern.
-pub fn fit_span<T>(
-    src: Span,
-    dst: Span,
-    p: impl 'static + Pattern<Value = T>,
-) -> impl Pattern<Value = T> {
+pub fn fit_span<T, P>(src: Span, dst: Span, p: P) -> impl Pattern<Value = T, Context = P::Context>
+where
+    P: Pattern<Value = T> + 'static,
+{
     // Adjust the rate of pattern so that src len matches dst.
     let rate = src.len() / dst.len();
     let rate_adjusted = p.rate(rate);
@@ -1245,7 +1393,10 @@ pub fn fit_span<T>(
 }
 
 /// The same as [fit_span_to], but assumes the `src` span is a single cycle.
-pub fn fit_cycle<T>(dst: Span, p: impl 'static + Pattern<Value = T>) -> impl Pattern<Value = T> {
+pub fn fit_cycle<T, P: Pattern<Value = T> + 'static>(
+    dst: Span,
+    p: P,
+) -> impl Pattern<Value = T, Context = P::Context> {
     fit_span(span!(0 / 1, 1 / 1), dst, p)
 }
 
@@ -1257,75 +1408,106 @@ fn rem_euclid(r: Rational, d: Rational) -> Rational {
 /// Divides up the cycle into `n` equal events, evenly distributing `k`
 /// number of `true` values between them using `bjorklund`'s algorithm,
 /// and filters out the `false` events. The resulting pattern only contains true events.
-pub fn euclid(k: usize, n: usize) -> impl Pattern<Value = bool> {
+pub fn euclid<C: Context>(k: usize, n: usize) -> impl Pattern<Value = bool, Context = C> {
     filter_euclid(euclid_bool(k, n))
 }
 
 /// The same as [`euclid`], but elongates the `true` event spans to fill
 /// the silence left by the filtered out `false` events. The resulting pattern only contains true events.
-pub fn euclid_full(k: usize, n: usize) -> impl Pattern<Value = bool> {
+pub fn euclid_full<C: Context>(k: usize, n: usize) -> impl Pattern<Value = bool, Context = C> {
     filter_euclid_full(euclid_bool_dist(k, n))
 }
 
 /// The same as [`euclid`], but allows providing an offset (or "rotation")
 /// for the euclidean rhythm. The resulting pattern only contains true events.
-pub fn euclid_off(k: usize, n: usize, off: isize) -> impl Pattern<Value = bool> {
+pub fn euclid_off<C: Context>(
+    k: usize,
+    n: usize,
+    off: isize,
+) -> impl Pattern<Value = bool, Context = C> {
     filter_euclid(euclid_off_bool(k, n, off))
 }
 
 /// The same as [`euclid_full`], but allows providing an offset (or "rotation")
 /// for the euclidean rhythm. The resulting pattern only contains true events.
-pub fn euclid_full_off(k: usize, n: usize, off: isize) -> impl Pattern<Value = bool> {
+pub fn euclid_full_off<C: Context>(
+    k: usize,
+    n: usize,
+    off: isize,
+) -> impl Pattern<Value = bool, Context = C> {
     filter_euclid_full(euclid_off_bool_dist(k, n, off))
 }
 
 /// Divides up the cycle into `n` equal events, evenly distributing `k`
 /// number of `true` values between them using `bjorklund`'s algorithm.
-pub fn euclid_bool(k: usize, n: usize) -> impl Pattern<Value = bool> {
-    fastcat(bjorklund(k, n).map(atom))
+pub fn euclid_bool<C: Context>(k: usize, n: usize) -> impl Pattern<Value = bool, Context = C> {
+    fastcat(bjorklund(k, n).map(|b| atom(b, C::empty())))
 }
 
 /// Divides up the cycle into `n` equal events, evenly distributing `k`
 /// number of `true` values between them using `bjorklund`'s algorithm.
 /// Also provides the distance until the next onset, inclusive of the
 /// current event.
-pub fn euclid_bool_dist(k: usize, n: usize) -> impl Pattern<Value = (bool, usize)> {
+pub fn euclid_bool_dist<C: Context>(
+    k: usize,
+    n: usize,
+) -> impl Pattern<Value = (bool, usize), Context = C> {
     let bs: Vec<_> = bjorklund(k, n).collect();
     let distances = bjorklund::distances(bs.clone());
-    fastcat(bs.into_iter().zip(distances).map(atom))
+    fastcat(
+        bs.into_iter()
+            .zip(distances)
+            .map(|(b, d)| atom((b, d), C::empty())),
+    )
 }
 
 /// The same as [`euclid_bool`], but allows providing an offset (or "rotation")
 /// for the euclidean rhythm.
-pub fn euclid_off_bool(k: usize, n: usize, off: isize) -> impl Pattern<Value = bool> {
+pub fn euclid_off_bool<C: Context>(
+    k: usize,
+    n: usize,
+    off: isize,
+) -> impl Pattern<Value = bool, Context = C> {
     let ni = isize::try_from(n).unwrap();
     let off: usize = off.rem_euclid(ni).try_into().unwrap();
     let bs: Vec<_> = bjorklund(k, n).collect();
     let bs: Vec<_> = bjorklund::offset(bs, off).collect();
-    fastcat(bs.into_iter().map(atom))
+    fastcat(bs.into_iter().map(|b| atom(b, C::empty())))
 }
 
 /// The same as [`euclid_bool`], but allows providing an offset (or "rotation")
 /// for the euclidean rhythm.
-pub fn euclid_off_bool_dist(k: usize, n: usize, off: isize) -> impl Pattern<Value = (bool, usize)> {
+pub fn euclid_off_bool_dist<C: Context>(
+    k: usize,
+    n: usize,
+    off: isize,
+) -> impl Pattern<Value = (bool, usize), Context = C> {
     let ni = isize::try_from(n).unwrap();
     let off: usize = off.rem_euclid(ni).try_into().unwrap();
     let bs: Vec<_> = bjorklund(k, n).collect();
     let bs: Vec<_> = bjorklund::offset(bs, off).collect();
     let distances = bjorklund::distances(bs.clone());
-    fastcat(bs.into_iter().zip(distances).map(atom))
+    fastcat(
+        bs.into_iter()
+            .zip(distances)
+            .map(|(b, d)| atom((b, d), C::empty())),
+    )
 }
 
 /// Given a pattern of bjorklund `bool`s, silences all `false` events,
 /// leaving only `true` events.
-fn filter_euclid(p: impl Pattern<Value = bool>) -> impl Pattern<Value = bool> {
+fn filter_euclid<C: Context>(
+    p: impl Pattern<Value = bool, Context = C>,
+) -> impl Pattern<Value = bool, Context = C> {
     move |span| p.query(span).filter(|ev| ev.value)
 }
 
 /// Given a pattern of bjorklund `bool`s and `distance`s, silences all
 /// `false` events and elongates their preceding `true` events to fill
 /// their silence.
-fn filter_euclid_full(p: impl Pattern<Value = (bool, usize)>) -> impl Pattern<Value = bool> {
+fn filter_euclid_full<C: Context>(
+    p: impl Pattern<Value = (bool, usize), Context = C>,
+) -> impl Pattern<Value = bool, Context = C> {
     move |span| {
         p.query(span).filter_map(|ev| {
             let (b, n) = ev.value;
@@ -1333,8 +1515,8 @@ fn filter_euclid_full(p: impl Pattern<Value = (bool, usize)>) -> impl Pattern<Va
                 return None;
             }
             let r = Rational::new(n.try_into().unwrap(), 1);
-            let span = ev.map_len(|len| len * r).span;
-            Some(Event::new(b, span.active, span.whole))
+            let ev = ev.map_len(|len| len * r);
+            Some(Event::new(b, ev.span.active, ev.span.whole, ev.context))
         })
     }
 }
@@ -1407,23 +1589,24 @@ mod tests {
 
     #[test]
     fn test_join() {
-        let pp = |active @ whole| core::iter::once(Event::new(m![1.0 1.0], active, Some(whole)));
+        let pp =
+            |active @ whole| core::iter::once(Event::new(m![1.0 1.0], active, Some(whole), ()));
         let p = join(pp);
         let mut q = p.query(span!(0 / 1, 2 / 1));
         let q0 = span!(0 / 1, 1 / 2);
         let q1 = span!(1 / 2, 1 / 1);
         let q2 = span!(1 / 1, 3 / 2);
         let q3 = span!(3 / 2, 2 / 1);
-        assert_eq!(q.next(), Some(Event::new(1.0, q0, Some(q0))));
-        assert_eq!(q.next(), Some(Event::new(1.0, q1, Some(q1))));
-        assert_eq!(q.next(), Some(Event::new(1.0, q2, Some(q2))));
-        assert_eq!(q.next(), Some(Event::new(1.0, q3, Some(q3))));
+        assert_eq!(q.next(), Some(Event::new(1.0, q0, Some(q0), ())));
+        assert_eq!(q.next(), Some(Event::new(1.0, q1, Some(q1), ())));
+        assert_eq!(q.next(), Some(Event::new(1.0, q2, Some(q2), ())));
+        assert_eq!(q.next(), Some(Event::new(1.0, q3, Some(q3), ())));
         assert_eq!(q.next(), None);
     }
 
     #[test]
     fn test_merge_extend() {
-        let p = ctrl::sound(atom("hello")).merge_extend(ctrl::note(atom(4.0)));
+        let p = ctrl::sound(atom("hello", ())).merge_extend(ctrl::note(atom(4.0, ())));
         // dbg!(p.debug_span(span!(0 / 1, 4 / 1)));
         let mut cycle = p.query(span!(0 / 1, 1 / 1));
         let mut expected = alloc::collections::BTreeMap::new();
@@ -1449,10 +1632,10 @@ mod tests {
         let s1 = span!(1 / 3, 1 / 2);
         let s2 = span!(1 / 2, 2 / 3);
         let s3 = span!(2 / 3, 1 / 1);
-        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(5.0, s1, Some(s1)));
-        assert_eq!(v[2], Event::new(13.0, s2, Some(s2)));
-        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0), ()));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(s1), ()));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(s2), ()));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3), ()));
         assert_eq!(v.len(), 4);
     }
 
@@ -1460,7 +1643,7 @@ mod tests {
     fn test_appl() {
         // When applying a signal (which has no wholes of its own) to a pattern, the structure comes entirely from the pattern.
         let a = m![2.0 4.0];
-        let b = signal(|v: Rational| v.to_f64_lossy()).map(|x| move |y| x + y);
+        let b = signal::<_, ()>(|v: Rational| v.to_f64_lossy()).map(|x| move |y| x + y);
         let p = a.appl(b);
         let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
         // cycle1                        cycle2
@@ -1471,15 +1654,15 @@ mod tests {
 
         let s0 = span!(0 / 1, 1 / 2);
         let s1 = span!(1 / 2, 1 / 1);
-        assert_eq!(v[0], Event::new(2.25, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(4.75, s1, Some(s1)));
+        assert_eq!(v[0], Event::new(2.25, s0, Some(s0), ()));
+        assert_eq!(v[1], Event::new(4.75, s1, Some(s1), ()));
         assert_eq!(v.len(), 2);
     }
 
     #[test]
     fn test_appr() {
         // When applying a signal (which has no wholes of its own) to a pattern, the structure comes entirely from the pattern.
-        let a = signal(|v: Rational| v.to_f64_lossy());
+        let a = signal::<_, ()>(|v: Rational| v.to_f64_lossy());
         let b = m![2.0 4.0].map(|x| move |y| x + y);
         let p = a.appr(b);
         let v: Vec<_> = p.query(span!(0 / 1, 1 / 1)).collect();
@@ -1491,8 +1674,8 @@ mod tests {
 
         let s0 = span!(0 / 1, 1 / 2);
         let s1 = span!(1 / 2, 1 / 1);
-        assert_eq!(v[0], Event::new(2.25, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(4.75, s1, Some(s1)));
+        assert_eq!(v[0], Event::new(2.25, s0, Some(s0), ()));
+        assert_eq!(v[1], Event::new(4.75, s1, Some(s1), ()));
         assert_eq!(v.len(), 2);
     }
 
@@ -1512,10 +1695,10 @@ mod tests {
         let s1 = span!(1 / 3, 1 / 2);
         let s2 = span!(1 / 2, 2 / 3);
         let s3 = span!(2 / 3, 1 / 1);
-        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(5.0, s1, Some(s1)));
-        assert_eq!(v[2], Event::new(13.0, s2, Some(s2)));
-        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0), ()));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(s1), ()));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(s2), ()));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3), ()));
         assert_eq!(v.len(), 4);
     }
 
@@ -1535,10 +1718,10 @@ mod tests {
         let s1 = span!(1 / 3, 1 / 2);
         let s2 = span!(1 / 2, 2 / 3);
         let s3 = span!(2 / 3, 1 / 1);
-        assert_eq!(v[0], Event::new(3.0, s0, Some(span!(0 / 1, 1 / 2))));
-        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(0 / 1, 1 / 2))));
-        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 2, 1 / 1))));
-        assert_eq!(v[3], Event::new(15.0, s3, Some(span!(1 / 2, 1 / 1))));
+        assert_eq!(v[0], Event::new(3.0, s0, Some(span!(0 / 1, 1 / 2)), ()));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(0 / 1, 1 / 2)), ()));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 2, 1 / 1)), ()));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(span!(1 / 2, 1 / 1)), ()));
         assert_eq!(v.len(), 4);
     }
 
@@ -1558,16 +1741,16 @@ mod tests {
         let s1 = span!(1 / 3, 1 / 2);
         let s2 = span!(1 / 2, 2 / 3);
         let s3 = span!(2 / 3, 1 / 1);
-        assert_eq!(v[0], Event::new(3.0, s0, Some(s0)));
-        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(1 / 3, 2 / 3))));
-        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 3, 2 / 3))));
-        assert_eq!(v[3], Event::new(15.0, s3, Some(s3)));
+        assert_eq!(v[0], Event::new(3.0, s0, Some(s0), ()));
+        assert_eq!(v[1], Event::new(5.0, s1, Some(span!(1 / 3, 2 / 3)), ()));
+        assert_eq!(v[2], Event::new(13.0, s2, Some(span!(1 / 3, 2 / 3)), ()));
+        assert_eq!(v[3], Event::new(15.0, s3, Some(s3), ()));
         assert_eq!(v.len(), 4);
     }
 
     #[test]
     fn test_rate() {
-        let p = atom("hello");
+        let p = atom("hello", ());
         // Only one event per cycle by default.
         let mut q = p.query(span!(0 / 1, 1 / 1));
         assert!(q.next().is_some());
@@ -1587,8 +1770,8 @@ mod tests {
 
     #[test]
     fn test_slowcat() {
-        let a = atom("a");
-        let b = atom("b");
+        let a = atom("a", ());
+        let b = atom("b", ());
         let cat = slowcat([a.into_dyn(), b.into_dyn()]);
         let span = span!(0 / 1, 5 / 2);
         let mut es = cat
@@ -1611,8 +1794,8 @@ mod tests {
 
     #[test]
     fn test_fastcat() {
-        let a = atom("a");
-        let b = atom("b");
+        let a = atom("a", ());
+        let b = atom("b", ());
         let cat = fastcat([a.into_dyn(), b.into_dyn()]);
         let span = span!(0 / 1, 5 / 4);
         let mut es = cat
@@ -1654,8 +1837,8 @@ mod tests {
 
     #[test]
     fn test_timecat1() {
-        let a = atom("a");
-        let b = atom("b");
+        let a = atom("a", ());
+        let b = atom("b", ());
         let cat = timecat([(Rational::from(1), a), (Rational::from(2), b)]);
         let span = span!(1 / 4, 3 / 2);
         // 0 | | | | | 1 | | | | | 2
@@ -1687,8 +1870,8 @@ mod tests {
 
     #[test]
     fn test_timecat2() {
-        let a = atom("a");
-        let b = atom("b");
+        let a = atom("a", ());
+        let b = atom("b", ());
         let cat = timecat([(Rational::from(2), a), (Rational::from(1), b)]);
         let span = span!(5 / 4, 5 / 2);
         // 0 | | | | | 1 | | | | | 2 | | | | | 3
@@ -1754,12 +1937,12 @@ mod tests {
         for n in 0..=max {
             let r = Rational::new(n, max);
             let i = span!(r);
-            let v1 = saw().query(i).map(|ev| ev.value).next().unwrap();
-            let v2 = saw2().query(i).map(|ev| ev.value).next().unwrap();
+            let v1 = saw::<()>().query(i).map(|ev| ev.value).next().unwrap();
+            let v2 = saw2::<()>().query(i).map(|ev| ev.value).next().unwrap();
             println!("{}: v1={}, v2={}", r, v1, v2);
         }
 
-        let p = saw();
+        let p = saw::<()>();
         let a = span!(1 / 2);
         let b = span!(-1 / 2);
         assert_eq!(
@@ -1777,12 +1960,12 @@ mod tests {
 
     #[test]
     fn test_dyn_pattern() {
-        let _patterns: Vec<DynPattern<_>> = vec![
+        let _patterns: Vec<DynPattern<_, ()>> = vec![
             saw().into_dyn(),
             saw2().into_dyn(),
             silence().into_dyn(),
             steady(Rational::new(1, 1)).into_dyn(),
-            atom(Rational::new(0, 1)).into_dyn(),
+            atom(Rational::new(0, 1), ()).into_dyn(),
         ];
     }
 
@@ -1791,7 +1974,11 @@ mod tests {
         let max = 10;
         for n in 0..=max {
             let i = span!(Rational::new(n, max));
-            let v = steady("hello").query(i).map(|ev| ev.value).next().unwrap();
+            let v = steady::<&str, ()>("hello")
+                .query(i)
+                .map(|ev| ev.value)
+                .next()
+                .unwrap();
             assert_eq!(v, "hello");
         }
     }
@@ -1801,18 +1988,18 @@ mod tests {
         let max = 10;
         for n in 0..=max {
             let i = span!(Rational::new(n, max));
-            assert!(silence::<Rational>().query(i).next().is_none());
+            assert!(silence::<Rational, ()>().query(i).next().is_none());
         }
     }
 
     #[test]
     fn test_pattern_reuse() {
-        let saw_ = saw();
+        let saw_ = saw::<()>();
         let max = 10;
         for n in 0..=max {
             let i = span!(Rational::new(n, max));
             let ev1 = saw_.query(i).next().unwrap();
-            let ev2 = saw().query(i).next().unwrap();
+            let ev2 = saw::<()>().query(i).next().unwrap();
             assert_eq!(ev1, ev2);
         }
     }
@@ -1820,7 +2007,7 @@ mod tests {
     #[test]
     fn test_atom() {
         let span = span!(0 / 1, 3 / 1);
-        let pattern = atom("hello");
+        let pattern = atom("hello", ());
         let mut values = pattern.query(span).map(|ev| ev.value);
         assert_eq!(Some("hello"), values.next());
         assert_eq!(Some("hello"), values.next());
@@ -1831,7 +2018,7 @@ mod tests {
     #[test]
     fn test_atom_whole() {
         let span = span!(0 / 1, 7 / 2);
-        let pattern = atom("hello");
+        let pattern = atom("hello", ());
         let mut events = pattern.query(span);
         {
             let mut values = events.by_ref().map(|ev| ev.value);
@@ -1850,14 +2037,14 @@ mod tests {
     #[test]
     #[cfg(feature = "std")]
     fn test_debug() {
-        let p = atom("hello");
+        let p = atom("hello", ());
         println!("{:?}", p.debug());
         println!("{:?}", p.debug_span(span!(2 / 1, 7 / 2)));
     }
 
     #[test]
     fn test_fit_span() {
-        let p = || atom("a");
+        let p = || atom("a", ());
         let src = span!(0 / 1, 1 / 1);
         let dst = span!(1 / 2, 3 / 4);
         let pfs = fit_span(src, dst, p());
@@ -1877,7 +2064,7 @@ mod tests {
 
     #[test]
     fn test_phase() {
-        let p = atom(()).phase();
+        let p = atom((), ()).phase();
         let span = span!(1 / 4, 3 / 4);
         let mut es = p.query(span).map(|ev| ev.value);
         assert_eq!(es.next(), Some([Rational::new(1, 4), Rational::new(3, 4)]));

@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use crate::{atom, Pattern, Rational};
+use crate::{atom, Context, Pattern, Rational};
 use alloc::string::{String, ToString};
 
 /// A pattern value type that allows for representing a set of labelled controls.
@@ -49,20 +49,20 @@ impl core::fmt::Display for Value {
 }
 
 /// Given a pattern of sound names, produce a control pattern of `"sound"` events.
-pub fn sound<P>(pattern: P) -> impl Pattern<Value = Controls>
+pub fn sound<P>(pattern: P) -> impl Pattern<Value = Controls, Context = P::Context>
 where
     P: 'static + Pattern,
     P::Value: Clone + Into<String>,
 {
     let f = |s: P::Value| core::iter::once((SOUND.to_string(), Value::String(s.into()))).collect();
-    pattern.app(atom(f))
+    pattern.app(atom(f, P::Context::empty()))
 }
 
 /// Given a pattern of note values, produce a control pattern of `"note"` events.
-pub fn note<P>(pattern: P) -> impl Pattern<Value = Controls>
+pub fn note<P>(pattern: P) -> impl Pattern<Value = Controls, Context = P::Context>
 where
     P: 'static + Pattern<Value = f64>,
 {
     let f = |n| core::iter::once((NOTE.to_string(), Value::F64(n))).collect();
-    pattern.app(atom(f))
+    pattern.app(atom(f, P::Context::empty()))
 }

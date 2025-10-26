@@ -4,20 +4,21 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::{span::Span, Event, Pattern};
+use crate::{span::Span, Context, Event, Pattern};
 
 /// An iterator produced by a query to a rendered slice of events.
-pub struct SliceEvents<'a, T> {
+pub struct SliceEvents<'a, T, C: Context> {
     span: Span,
     /// The start of the known, consistently intersecting range.
     consistently_intersecting_start: usize,
     /// Enumerated events, excluding non-intersecting tail events.
-    events: core::iter::Enumerate<core::slice::Iter<'a, Event<T>>>,
+    events: core::iter::Enumerate<core::slice::Iter<'a, Event<T, C>>>,
 }
 
-impl<'a, T> Pattern for &'a [Event<T>] {
+impl<'a, T, C: Context> Pattern for &'a [Event<T, C>] {
     type Value = &'a T;
-    type Events = SliceEvents<'a, T>;
+    type Context = C;
+    type Events = SliceEvents<'a, T, C>;
     /// Assumes all events are ordered (at least by their spans).
     fn query(&self, span: Span) -> Self::Events {
         let range = range_consistently_intersecting(self, span);
@@ -31,8 +32,8 @@ impl<'a, T> Pattern for &'a [Event<T>] {
     }
 }
 
-impl<'a, T> Iterator for SliceEvents<'a, T> {
-    type Item = Event<&'a T>;
+impl<'a, T, C: Context> Iterator for SliceEvents<'a, T, C> {
+    type Item = Event<&'a T, C>;
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((ix, ev)) = self.events.next() {
             // If we're still before the region of known intersecting
@@ -42,13 +43,23 @@ impl<'a, T> Iterator for SliceEvents<'a, T> {
             if ix < self.consistently_intersecting_start {
                 if self.span.start < active.end {
                     active.start = self.span.start;
-                    return Some(Event::new(&ev.value, active, ev.span.whole));
+                    return Some(Event::new(
+                        &ev.value,
+                        active,
+                        ev.span.whole,
+                        ev.context.clone(),
+                    ));
                 }
             // Otherwise, assume the `start` is already in range to
             // reduce expensive `Rational` comparisons.
             } else {
                 active.end = core::cmp::min(active.end, self.span.end);
-                return Some(Event::new(&ev.value, active, ev.span.whole));
+                return Some(Event::new(
+                    &ev.value,
+                    active,
+                    ev.span.whole,
+                    ev.context.clone(),
+                ));
             };
         }
         None
@@ -63,7 +74,7 @@ impl<'a, T> Iterator for SliceEvents<'a, T> {
 /// intersecting events to avoid iterating through the entire slice.
 ///
 /// The aim is to achieve O(log n) complexity as opposed to O(n).
-pub fn retain_intersecting<T>(events: &mut Vec<Event<T>>, span: Span) {
+pub fn retain_intersecting<T, C: Context>(events: &mut Vec<Event<T, C>>, span: Span) {
     let range = range_consistently_intersecting(events, span);
     // Remove all events that start at or after the end of our
     // span as we know they do not intersect.
@@ -91,8 +102,8 @@ pub fn retain_intersecting<T>(events: &mut Vec<Event<T>>, span: Span) {
 /// - The range `end` is the first event that starts at or after the
 ///   given span `end`. All events following this index are known to
 ///   not intersect.
-pub fn range_consistently_intersecting<T>(
-    events: &[Event<T>],
+pub fn range_consistently_intersecting<T, C: Context>(
+    events: &[Event<T, C>],
     span: Span,
 ) -> core::ops::Range<usize> {
     let first_event_with_start_gte_span_start = events
@@ -123,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let events: [Event<()>; 0] = [];
+        let events: [Event<(), ()>; 0] = [];
         let pattern = &events[..];
         let mut result = pattern.query(Span::new(0.into(), 1.into()));
         assert_eq!(result.next(), None);
@@ -132,7 +143,7 @@ mod tests {
     #[test]
     fn test_single_event() {
         let span = span!(0 / 1, 1 / 1);
-        let events = [Event::new((), span, None)];
+        let events = [Event::new((), span, None, ())];
         let pattern = &events[..];
         let mut result = pattern.query(span);
         assert_eq!(result.next().unwrap().value, &());
@@ -142,8 +153,8 @@ mod tests {
     #[test]
     fn test_multiple_events() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
         ];
         let pattern = &events[..];
         let mut result = pattern.query(span!(0 / 1, 1 / 1));
@@ -155,8 +166,8 @@ mod tests {
     #[test]
     fn test_query_span_outside_events() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
         ];
         let pattern = &events[..];
         let mut result = pattern.query(span!(2 / 1, 3 / 1));
@@ -166,9 +177,9 @@ mod tests {
     #[test]
     fn test_query_span_partial_overlap() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
-            Event::new(2, span!(1 / 1, 3 / 2), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
+            Event::new(2, span!(1 / 1, 3 / 2), None, ()),
         ];
         let pattern = &events[..];
         let mut result = pattern.query(span!(1 / 4, 5 / 4));
@@ -181,8 +192,8 @@ mod tests {
     #[test]
     fn test_active_span_within_query() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
         ];
         let pattern = &events[..];
         let mut evs = pattern.query(span!(1 / 4, 3 / 4));
@@ -198,8 +209,8 @@ mod tests {
     #[test]
     fn test_active_span_partial_overlap_start() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
         ];
         let pattern = &events[..];
         let mut evs = pattern.query(span!(1 / 8, 3 / 4));
@@ -215,9 +226,9 @@ mod tests {
     #[test]
     fn test_active_span_partial_overlap_end() {
         let events = [
-            Event::new(0, span!(0 / 1, 1 / 2), None),
-            Event::new(1, span!(1 / 2, 1 / 1), None),
-            Event::new(2, span!(1 / 1, 3 / 2), None),
+            Event::new(0, span!(0 / 1, 1 / 2), None, ()),
+            Event::new(1, span!(1 / 2, 1 / 1), None, ()),
+            Event::new(2, span!(1 / 1, 3 / 2), None, ()),
         ];
         let pattern = &events[..];
         let mut evs = pattern.query(span!(1 / 4, 5 / 4));

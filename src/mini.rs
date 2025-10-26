@@ -1,8 +1,8 @@
 //! A mini-notation implementation inspired by tidalcycles'.
 #[macro_export]
 macro_rules! m {
-    (atom $i:ident) => {{ $crate::atom(stringify!($i)) }};
-    (atom $l:literal) => {{ $crate::atom($l) }};
+    (atom $i:ident) => {{ $crate::atom(stringify!($i), ()) }};
+    (atom $l:literal) => {{ $crate::atom($l, ()) }};
     (atom ~) => {{ $crate::silence() }};
     (atom ($t:tt) $elongate:literal $($ts:tt)*) => {{
         let rate = $crate::Rational::new(1, $elongate);
