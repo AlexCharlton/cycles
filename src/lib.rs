@@ -809,6 +809,11 @@ impl<T, C: Context> Event<T, C> {
         self.map_spans(|s| s.map_len(&map))
     }
 
+    pub fn map_context(mut self, map: impl Fn(C) -> C) -> Self {
+        self.context = map(self.context);
+        self
+    }
+
     pub fn by_ref(&self) -> Event<&T, C> {
         Event::new(
             &self.value,
